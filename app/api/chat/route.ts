@@ -41,7 +41,7 @@ export async function POST(req: Request) {
       remember: tool({
         description:
           "Save a durable fact about the human (preferences, names, plans, projects). Use when they tell you something worth keeping.",
-        parameters: z.object({ fact: z.string() }),
+        inputSchema: z.object({ fact: z.string() }),
         execute: async ({ fact }) => {
           facts.push(fact);
           return "Noted. It has been recorded in the royal archives.";
@@ -49,7 +49,7 @@ export async function POST(req: Request) {
       }),
       recall: tool({
         description: "Search your memory for facts matching a keyword or topic.",
-        parameters: z.object({ keyword: z.string() }),
+        inputSchema: z.object({ keyword: z.string() }),
         execute: async ({ keyword }) => {
           const hits = facts.filter((f) =>
             f.toLowerCase().includes(keyword.toLowerCase())
