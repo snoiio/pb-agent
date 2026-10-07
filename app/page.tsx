@@ -1,10 +1,12 @@
 'use client';
 
+import { useState } from "react";
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport } from "ai";
 
 export default function Chat() {
-  const { messages, sendMessage, input, setInput, status } = useChat({
+  const [input, setInput] = useState("");
+  const { messages, sendMessage, status } = useChat({
     transport: new DefaultChatTransport({ api: "/api/chat" }),
   });
   const busy = status === "streaming" || status === "submitted";
@@ -17,7 +19,7 @@ export default function Chat() {
           <div key={m.id} style={{
             alignSelf: m.role === "user" ? "flex-end" : "flex-start",
             background: m.role === "user" ? "#4a3f8c" : "#2d2d44",
-            borderRadius: 12, padding: "8px 12px", maxWidth: "85%", whiteSpace: "pre-trial",
+            borderRadius: 12, padding: "8px 12px", maxWidth: "85%", whiteSpace: "pre-wrap",
           }}>
             {m.parts.map((p, i) => (p.type === "text" ? <span key={i}>{p.text}</span> : null))}
           </div>
@@ -25,7 +27,13 @@ export default function Chat() {
         {busy && <div style={{ opacity: 0.6 }}>The Princess is thinking…</div>}
       </div>
       <form
-        onSubmit={(e) => { e.preventDefault(); if (input.trim()) sendMessage({ text: input }); setInput(""); }}
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (input.trim() && !busy) {
+            sendMessage({ text: input });
+            setInput("");
+          }
+        }}
         style={{ display: "flex", gap: 8, marginTop: 8 }}
       >
         <input
