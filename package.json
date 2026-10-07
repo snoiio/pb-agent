@@ -7,8 +7,8 @@
     "start": "next start"
   },
   "dependencies": {
-    "ai": "^6.0.0",
-    "@ai-sdk/react": "^2.0.0",
+    "ai": "^5.0.0",
+    "@ai-sdk/react": "^1.0.0",
     "@openrouter/ai-sdk-provider": "^1.0.0",
     "next": "^15.0.0",
     "react": "^19.0.0",
