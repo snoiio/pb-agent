@@ -38,6 +38,7 @@ const toolIcons: Record<string, string> = {
   recall: "🔎",
   updateMemory: "✏️",
   forget: "🗑️",
+  generateImage: "🎨",
 };
 
 export default function Chat() {
@@ -202,7 +203,6 @@ export default function Chat() {
 
         if (
           toolPart.state !== "output-available" ||
-          typeof toolPart.output !== "string" ||
           !toolPart.toolCallId
         ) {
           continue;
@@ -211,15 +211,21 @@ export default function Chat() {
         if (!seenToolCalls.current.has(toolPart.toolCallId) && toolPart.type?.startsWith("tool-")) {
           const name = toolPart.type.slice(5);
           const toolInput = toolPart.input as { keyword?: string } | undefined;
+          const outputText = typeof toolPart.output === "string" ? toolPart.output : "";
+          const imageResult = name === "generateImage" ? toolPart.output as { ok?: boolean; error?: string } : null;
           let summary = "Tool completed";
           let success = true;
 
-          if (name === "remember") summary = toolPart.output.startsWith("Memory created:") ? "Memory created" : toolPart.output;
+          if (name === "remember") summary = outputText.startsWith("Memory created:") ? "Memory created" : toolPart.output;
           else if (name === "recall") summary = toolInput?.keyword ? `Searched memory for "${toolInput.keyword}"` : "Searched memory";
-          else if (name === "updateMemory") summary = toolPart.output.startsWith("Memory updated:") ? "Memory updated" : toolPart.output;
-          else if (name === "forget") summary = toolPart.output.startsWith("Memory deleted:") ? "Memory deleted" : toolPart.output;
+          else if (name === "updateMemory") summary = outputText.startsWith("Memory updated:") ? "Memory updated" : toolPart.output;
+          else if (name === "forget") summary = outputText.startsWith("Memory deleted:") ? "Memory deleted" : toolPart.output;
 
-          if (toolPart.output.startsWith("No memory with ID")) success = false;
+          if (name === "generateImage") {
+            success = imageResult?.ok === true;
+            summary = success ? "Generated a temporary image" : (imageResult?.error ?? "Image generation failed");
+          }
+          if (outputText.startsWith("No memory with ID")) success = false;
 
           const entry: ToolEvent = {
             id: toolPart.toolCallId,
@@ -246,11 +252,11 @@ export default function Chat() {
 
         if (seenMemoryToolCalls.current.has(toolPart.toolCallId)) continue;
 
-        if (toolPart.type === "tool-remember" && toolPart.output.startsWith("Memory created:")) {
+        if (toolPart.type === "tool-remember" && outputText.startsWith("Memory created:")) {
           notice = "🗄️ Memory saved";
-        } else if (toolPart.type === "tool-updateMemory" && toolPart.output.startsWith("Memory updated:")) {
+        } else if (toolPart.type === "tool-updateMemory" && outputText.startsWith("Memory updated:")) {
           notice = "🗄️ Memory updated";
-        } else if (toolPart.type === "tool-forget" && toolPart.output.startsWith("Memory deleted:")) {
+        } else if (toolPart.type === "tool-forget" && outputText.startsWith("Memory deleted:")) {
           notice = "🗄️ Memory forgotten";
         }
 
@@ -349,7 +355,7 @@ export default function Chat() {
               </>
             ) : (
               <>
-                <div style={{ fontSize: 12, opacity: 0.55, marginBottom: 12 }}>Stored only in this browser · latest 50 calls</div>
+                <div style={{ fontSize: 12, opacity: 0.55, marginBottom: 12 }}>Stored only in this browser · latest 50 entries · image bytes excluded</div>
                 {toolEvents.length === 0 ? (
                   <div style={{ opacity: 0.6, padding: 12 }}>No tool calls logged yet.</div>
                 ) : (
@@ -395,7 +401,17 @@ export default function Chat() {
       <div style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column", gap: 8 }}>
         {messages.map((m) => (
           <div key={m.id} style={{ alignSelf: m.role === "user" ? "flex-end" : "flex-start", background: m.role === "user" ? "#4a3f8c" : "#2d2d44", borderRadius: 12, padding: "8px 12px", maxWidth: "85%", whiteSpace: "pre-wrap" }}>
-            {m.parts.map((p, i) => (p.type === "text" ? <span key={i}>{p.text}</span> : null))}
+            {m.parts.map((p, i) => {
+              if (p.type === "text") return <span key={i}>{p.text}</span>;
+              if (p.type === "tool-generateImage") {
+                const result = p.output as { ok?: boolean; imageUrl?: string; prompt?: string } | undefined;
+                if (p.state === "output-available" && result?.ok && result.imageUrl?.startsWith("data:image/")) {
+                  return <img key={i} src={result.imageUrl} alt={result.prompt ?? "Generated illustration"} width={256} height={256} style={{ display: "block", maxWidth: "100%", height: "auto", borderRadius: 10, marginTop: 8 }} />;
+                }
+                if (p.state === "output-available" && !result?.ok) return <span key={i} style={{ opacity: 0.7 }}>Image generation failed.</span>;
+              }
+              return null;
+            })}
           </div>
         ))}
         {busy && <div style={{ opacity: 0.6 }}>The Princess is thinking…</div>}
