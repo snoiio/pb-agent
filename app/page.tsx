@@ -17,6 +17,8 @@ type ToolEvent = {
   name: string;
   summary: string;
   success: boolean;
+  state?: string;
+  error?: string | null;
 };
 
 type ResponseEvent = {
@@ -26,6 +28,7 @@ type ResponseEvent = {
   messageId: string;
   textLength: number;
   partTypes: string[];
+  toolStates: string[];
   status: string;
   error: string | null;
   blank: boolean;
@@ -161,6 +164,13 @@ export default function Chat() {
     if (!assistant || seenResponses.current.has(assistant.id)) return;
     seenResponses.current.add(assistant.id);
     const textLength = assistant.parts.reduce((sum, part) => sum + (part.type === "text" ? part.text.length : 0), 0);
+    const toolStates = assistant.parts
+      .filter((part) => part.type.startsWith("tool-"))
+      .map((part) => {
+        const toolPart = part as { type?: string; state?: string; errorText?: string };
+        const suffix = toolPart.errorText ? ` · ${toolPart.errorText}` : "";
+        return `${toolPart.type ?? "tool"}: ${toolPart.state ?? "unknown"}${suffix}`;
+      });
     const entry: ResponseEvent = {
       id: `response-${assistant.id}`,
       timestamp: new Date().toISOString(),
@@ -168,6 +178,7 @@ export default function Chat() {
       messageId: assistant.id,
       textLength,
       partTypes: assistant.parts.map((part) => part.type),
+      toolStates,
       status,
       error: error?.message ?? null,
       blank: textLength === 0,
@@ -199,33 +210,34 @@ export default function Chat() {
           state?: string;
           output?: unknown;
           input?: unknown;
+          errorText?: string;
         };
 
-        if (
-          toolPart.state !== "output-available" ||
-          !toolPart.toolCallId
-        ) {
-          continue;
-        }
+        if (!toolPart.toolCallId || !toolPart.type?.startsWith("tool-")) continue;
 
-        if (!seenToolCalls.current.has(toolPart.toolCallId) && toolPart.type?.startsWith("tool-")) {
+        if (!seenToolCalls.current.has(toolPart.toolCallId)) {
           const name = toolPart.type.slice(5);
           const toolInput = toolPart.input as { keyword?: string } | undefined;
           const outputText = typeof toolPart.output === "string" ? toolPart.output : "";
           const imageResult = name === "generateImage" ? toolPart.output as { ok?: boolean; error?: string } : null;
-          let summary = "Tool completed";
-          let success = true;
+          const isComplete = toolPart.state === "output-available";
+          const isError = toolPart.state === "output-error" || Boolean(toolPart.errorText);
+          let summary = isComplete ? "Tool completed" : `Tool state: ${toolPart.state ?? "unknown"}`;
+          let success = isComplete && !isError;
 
-          if (name === "remember") summary = outputText.startsWith("Memory created:") ? "Memory created" : toolPart.output;
-          else if (name === "recall") summary = toolInput?.keyword ? `Searched memory for "${toolInput.keyword}"` : "Searched memory";
-          else if (name === "updateMemory") summary = outputText.startsWith("Memory updated:") ? "Memory updated" : toolPart.output;
-          else if (name === "forget") summary = outputText.startsWith("Memory deleted:") ? "Memory deleted" : toolPart.output;
-
-          if (name === "generateImage") {
-            success = imageResult?.ok === true;
-            summary = success ? "Generated a temporary image" : (imageResult?.error ?? "Image generation failed");
+          if (isComplete) {
+            if (name === "remember") summary = outputText.startsWith("Memory created:") ? "Memory created" : outputText;
+            else if (name === "recall") summary = toolInput?.keyword ? `Searched memory for "${toolInput.keyword}"` : "Searched memory";
+            else if (name === "updateMemory") summary = outputText.startsWith("Memory updated:") ? "Memory updated" : outputText;
+            else if (name === "forget") summary = outputText.startsWith("Memory deleted:") ? "Memory deleted" : outputText;
+            else if (name === "generateImage") {
+              success = imageResult?.ok === true;
+              summary = success ? "Generated a temporary image" : (imageResult?.error ?? "Image generation failed");
+            }
+            if (outputText.startsWith("No memory with ID")) success = false;
+          } else if (toolPart.errorText) {
+            summary = toolPart.errorText;
           }
-          if (outputText.startsWith("No memory with ID")) success = false;
 
           const entry: ToolEvent = {
             id: toolPart.toolCallId,
@@ -233,6 +245,8 @@ export default function Chat() {
             name,
             summary,
             success,
+            state: toolPart.state,
+            error: toolPart.errorText ?? null,
           };
           try {
             const existing = JSON.parse(window.localStorage.getItem("pb-tool-log") ?? "[]");
@@ -247,9 +261,13 @@ export default function Chat() {
           } else {
             setToolChanged(true);
           }
-          seenToolCalls.current.add(toolPart.toolCallId);
+          if (isComplete || isError || toolPart.state === "input-available") {
+            seenToolCalls.current.add(toolPart.toolCallId);
+          }
         }
 
+        if (toolPart.state !== "output-available" || typeof toolPart.output !== "string") continue;
+        const outputText = toolPart.output;
         if (seenMemoryToolCalls.current.has(toolPart.toolCallId)) continue;
 
         if (toolPart.type === "tool-remember" && outputText.startsWith("Memory created:")) {
@@ -368,18 +386,21 @@ export default function Chat() {
                             <div style={{ fontSize: 12, opacity: 0.55, marginTop: 6 }}>{formatDate(event.timestamp, true)}</div>
                             <div style={{ marginTop: 8, lineHeight: 1.5 }}>Browser text length: {event.textLength}</div>
                             <div style={{ lineHeight: 1.5 }}>Message parts: {JSON.stringify(event.partTypes)}</div>
+                            <div style={{ lineHeight: 1.5 }}>Tool states: {event.toolStates.length ? JSON.stringify(event.toolStates) : "None"}</div>
                             <div style={{ lineHeight: 1.5 }}>Chat status: {event.status}</div>
                             <div style={{ lineHeight: 1.5 }}>Error: {event.error ?? "None reported"}</div>
                             <div style={{ fontSize: 12, opacity: 0.55, marginTop: 6, overflowWrap: "anywhere" }}>Message ID: {event.messageId}</div>
                           </>
                         ) : (
                           <>
-                        <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "flex-start" }}>
-                          <div style={{ fontWeight: 700 }}>{toolIcons[event.name] ?? "🔧"} {event.name}</div>
-                          <div style={{ fontSize: 12, opacity: 0.55, textAlign: "right" }}>{formatDate(event.timestamp, true)}</div>
-                        </div>
-                        <div style={{ marginTop: 8, lineHeight: 1.4 }}>{event.summary}</div>
-                        {!event.success && <div style={{ marginTop: 8, fontSize: 12, opacity: 0.7 }}>Failed</div>}
+                            <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "flex-start" }}>
+                              <div style={{ fontWeight: 700 }}>{toolIcons[event.name] ?? "🔧"} {event.name}</div>
+                              <div style={{ fontSize: 12, opacity: 0.55, textAlign: "right" }}>{formatDate(event.timestamp, true)}</div>
+                            </div>
+                            <div style={{ marginTop: 8, lineHeight: 1.4 }}>{event.summary}</div>
+                            {event.state && <div style={{ marginTop: 6, fontSize: 12, opacity: 0.7 }}>State: {event.state}</div>}
+                            {event.error && <div style={{ marginTop: 6, fontSize: 12, opacity: 0.7 }}>Error: {event.error}</div>}
+                            {!event.success && <div style={{ marginTop: 8, fontSize: 12, opacity: 0.7 }}>Failed</div>}
                           </>
                         )}
                       </section>
