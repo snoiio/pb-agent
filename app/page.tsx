@@ -6,7 +6,7 @@ import { DefaultChatTransport } from "ai";
 
 export default function Chat() {
   const [input, setInput] = useState("");
-  const [memoryNotice, setMemoryNotice] = useState(false);
+  const [memoryNotice, setMemoryNotice] = useState<string | null>(null);
   const seenMemoryToolCalls = useRef(new Set<string>());
   const timeZone =
     typeof Intl !== "undefined"
@@ -22,7 +22,7 @@ export default function Chat() {
   const busy = status === "streaming" || status === "submitted";
 
   useEffect(() => {
-    let foundNewMemory = false;
+    let notice: string | null = null;
 
     for (const message of messages) {
       for (const part of message.parts) {
@@ -34,23 +34,41 @@ export default function Chat() {
         };
 
         if (
-          toolPart.type === "tool-remember" &&
-          toolPart.state === "output-available" &&
-          typeof toolPart.output === "string" &&
-          toolPart.output.startsWith("Memory created:") &&
-          toolPart.toolCallId &&
-          !seenMemoryToolCalls.current.has(toolPart.toolCallId)
+          toolPart.state !== "output-available" ||
+          typeof toolPart.output !== "string" ||
+          !toolPart.toolCallId ||
+          seenMemoryToolCalls.current.has(toolPart.toolCallId)
         ) {
+          continue;
+        }
+
+        if (
+          toolPart.type === "tool-remember" &&
+          toolPart.output.startsWith("Memory created:")
+        ) {
+          notice = "🗄️ Memory saved";
+        } else if (
+          toolPart.type === "tool-updateMemory" &&
+          toolPart.output.startsWith("Memory updated:")
+        ) {
+          notice = "🗄️ Memory updated";
+        } else if (
+          toolPart.type === "tool-forget" &&
+          toolPart.output.startsWith("Memory deleted:")
+        ) {
+          notice = "🗄️ Memory forgotten";
+        }
+
+        if (notice) {
           seenMemoryToolCalls.current.add(toolPart.toolCallId);
-          foundNewMemory = true;
         }
       }
     }
 
-    if (!foundNewMemory) return;
+    if (!notice) return;
 
-    setMemoryNotice(true);
-    const timer = window.setTimeout(() => setMemoryNotice(false), 2500);
+    setMemoryNotice(notice);
+    const timer = window.setTimeout(() => setMemoryNotice(null), 2500);
     return () => window.clearTimeout(timer);
   }, [messages]);
 
@@ -72,7 +90,7 @@ export default function Chat() {
             fontSize: 14,
           }}
         >
-          🧠 Memory saved
+          {memoryNotice}
         </div>
       )}
       <div style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column", gap: 8 }}>
