@@ -8,6 +8,7 @@ import { DefaultChatTransport } from "ai";
 export default function Chat() {
   const [input, setInput] = useState("");
   const [memoryNotice, setMemoryNotice] = useState<string | null>(null);
+  const [memoryChanged, setMemoryChanged] = useState(false);
   const seenMemoryToolCalls = useRef(new Set<string>());
   const timeZone =
     typeof Intl !== "undefined"
@@ -21,6 +22,10 @@ export default function Chat() {
     }),
   });
   const busy = status === "streaming" || status === "submitted";
+
+  useEffect(() => {
+    setMemoryChanged(window.localStorage.getItem("pb-memory-changed") === "true");
+  }, []);
 
   useEffect(() => {
     let notice: string | null = null;
@@ -68,6 +73,8 @@ export default function Chat() {
 
     if (!notice) return;
 
+    window.localStorage.setItem("pb-memory-changed", "true");
+    setMemoryChanged(true);
     setMemoryNotice(notice);
     const timer = window.setTimeout(() => setMemoryNotice(null), 2500);
     return () => window.clearTimeout(timer);
@@ -81,9 +88,24 @@ export default function Chat() {
           href="/memories"
           aria-label="Browse memories"
           title="Memories"
-          style={{ color: "#eee", textDecoration: "none", fontSize: 22, padding: 8 }}
+          style={{ color: "#eee", textDecoration: "none", fontSize: 22, padding: 8, position: "relative", display: "inline-block" }}
         >
           🗄️
+          {memoryChanged && (
+            <span
+              aria-hidden="true"
+              style={{
+                position: "absolute",
+                top: 5,
+                right: 4,
+                width: 8,
+                height: 8,
+                borderRadius: "50%",
+                background: "#e879a8",
+                boxShadow: "0 0 0 2px #1a1a2e",
+              }}
+            />
+          )}
         </Link>
       </div>
       {memoryNotice && (
