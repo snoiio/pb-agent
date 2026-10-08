@@ -215,7 +215,7 @@ export default function Chat() {
 
         if (!toolPart.toolCallId || !toolPart.type?.startsWith("tool-")) continue;
 
-        if (!seenToolCalls.current.has(toolPart.toolCallId)) {
+        if (!seenToolCalls.current.has(toolPart.toolCallId) && (toolPart.state === "output-available" || toolPart.state === "output-error" || Boolean(toolPart.errorText))) {
           const name = toolPart.type.slice(5);
           const toolInput = toolPart.input as { keyword?: string } | undefined;
           const outputText = typeof toolPart.output === "string" ? toolPart.output : "";
@@ -261,9 +261,7 @@ export default function Chat() {
           } else {
             setToolChanged(true);
           }
-          if (isComplete || isError || toolPart.state === "input-available") {
-            seenToolCalls.current.add(toolPart.toolCallId);
-          }
+          seenToolCalls.current.add(toolPart.toolCallId);
         }
 
         if (toolPart.state !== "output-available" || typeof toolPart.output !== "string") continue;
