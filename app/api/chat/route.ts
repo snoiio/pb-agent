@@ -249,7 +249,7 @@ function sanitizeImageOutputs(messages: any[]) {
 
 async function generateTemporaryImage(prompt: string) {
   const apiKey = process.env.OPENROUTER_API_KEY;
-  const model = "bytedance-seed/seedream-4.5";
+  const model = "recraft/recraft-v4.1-flash";
   console.log("[PB image] execute started", { promptLength: prompt.length });
   if (!apiKey) {
     console.error("[PB image] Missing API key");
