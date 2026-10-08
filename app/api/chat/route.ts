@@ -307,8 +307,6 @@ async function generateTemporaryImage(prompt: string) {
   }
 }
 
-
-
 // NovelAI is the active image backend. The OpenRouter implementation above
 // remains available for a future provider switch.
 async function generateNovelAIImage(prompt: string) {
@@ -408,7 +406,6 @@ async function generateNovelAIImage(prompt: string) {
   }
 }
 
-
 export async function POST(req: Request) {
   const { messages, timeZone } = await req.json();
   const humanTimeZone = validTimeZone(timeZone);
@@ -423,17 +420,23 @@ export async function POST(req: Request) {
 
     tools: {
       generateImage: tool({
-        description: "Generate one temporary illustration to display in chat. You choose its subject and art style, including how to depict yourself. Use only when requested or genuinely useful. You cannot visually inspect the result.",
+        description: "Generate one temporary illustration to display in chat. You choose its subject and art style, including how to depict yourself. Use only when requested or genuinely useful. You do not automatically see the generated result; use inspectImage if you want to examine the most recent image.",
         inputSchema: z.object({ prompt: z.string().min(1).max(1800) }),
         execute: async ({ prompt }) => generateNovelAIImage(prompt),
         toModelOutput: (output) => ({
           type: "text" as const,
           value:
             output && typeof output === "object" && "ok" in output && output.ok
-              ? "Image generated and shown to the human. You have not visually inspected it."
+              ? "Image generated and shown to the human. You have not visually inspected it. You may use inspectImage if you want to examine it."
               : output && typeof output === "object" && "error" in output && typeof output.error === "string"
                 ? output.error
                 : "Image generation failed.",
+        }),
+      }),
+      inspectImage: tool({
+        description: "Inspect the most recently generated image when you actually want to see what NovelAI produced. The browser will send a temporary inspection copy to a vision model and return its visual observations. Use an optional focus only when you care about a particular detail.",
+        inputSchema: z.object({
+          focus: z.string().max(500).optional(),
         }),
       }),
       remember: tool({
