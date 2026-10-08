@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useChat } from "@ai-sdk/react";
-import { DefaultChatTransport } from "ai";
+import { DefaultChatTransport, lastAssistantMessageIsCompleteWithToolCalls } from "ai";
 
 type Memory = {
   id: number;
@@ -57,12 +57,39 @@ function sanitizeOutgoingMessages(messages: Parameters<NonNullable<ConstructorPa
   }));
 }
 
+// Vision only needs a readable copy, not NovelAI's full PNG. Downscaling here
+// keeps the one-off inspection request safely below Vercel's payload limit.
+async function prepareImageForInspection(dataUrl: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => {
+      const maxDimension = 1024;
+      const scale = Math.min(1, maxDimension / Math.max(image.naturalWidth, image.naturalHeight));
+      const width = Math.max(1, Math.round(image.naturalWidth * scale));
+      const height = Math.max(1, Math.round(image.naturalHeight * scale));
+      const canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = height;
+      const context = canvas.getContext("2d");
+      if (!context) {
+        reject(new Error("Canvas is unavailable."));
+        return;
+      }
+      context.drawImage(image, 0, 0, width, height);
+      resolve(canvas.toDataURL("image/jpeg", 0.82));
+    };
+    image.onerror = () => reject(new Error("The latest image could not be prepared for inspection."));
+    image.src = dataUrl;
+  });
+}
+
 const toolIcons: Record<string, string> = {
   remember: "🗄️",
   recall: "🔎",
   updateMemory: "✏️",
   forget: "🗑️",
   generateImage: "🎨",
+  inspectImage: "👁️",
 };
 
 export default function Chat() {
@@ -81,6 +108,7 @@ export default function Chat() {
 
   const [toolEvents, setToolEvents] = useState<LogEvent[]>([]);
   const seenResponses = useRef(new Set<string>());
+  const latestImageRef = useRef<string | null>(null);
 
   const seenMemoryToolCalls = useRef(new Set<string>());
   const seenToolCalls = useRef(new Set<string>());
@@ -89,7 +117,7 @@ export default function Chat() {
       ? Intl.DateTimeFormat().resolvedOptions().timeZone
       : undefined;
 
-  const { messages, sendMessage, status, error } = useChat({
+  const { messages, sendMessage, status, error, addToolOutput } = useChat({
     transport: new DefaultChatTransport({
       api: "/api/chat",
       body: { timeZone },
@@ -100,6 +128,49 @@ export default function Chat() {
         },
       }),
     }),
+    sendAutomaticallyWhen: lastAssistantMessageIsCompleteWithToolCalls,
+    async onToolCall({ toolCall }) {
+      if (toolCall.dynamic || toolCall.toolName !== "inspectImage") return;
+
+      const imageUrl = latestImageRef.current;
+      if (!imageUrl) {
+        addToolOutput({
+          tool: "inspectImage",
+          toolCallId: toolCall.toolCallId,
+          output: "There is no generated image available to inspect in this browser session.",
+        });
+        return;
+      }
+
+      try {
+        const inspectionImage = await prepareImageForInspection(imageUrl);
+        const input = toolCall.input as { focus?: string };
+        const response = await fetch("/api/inspect-image", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            imageUrl: inspectionImage,
+            focus: typeof input?.focus === "string" ? input.focus : undefined,
+          }),
+        });
+        const payload = await response.json() as { ok?: boolean; description?: string; error?: string };
+        const output = response.ok && payload.ok && payload.description
+          ? payload.description
+          : `Image inspection failed: ${payload.error ?? `HTTP ${response.status}`}`;
+
+        addToolOutput({
+          tool: "inspectImage",
+          toolCallId: toolCall.toolCallId,
+          output,
+        });
+      } catch (inspectionError) {
+        addToolOutput({
+          tool: "inspectImage",
+          toolCallId: toolCall.toolCallId,
+          output: `Image inspection failed: ${inspectionError instanceof Error ? inspectionError.message : "Unknown error"}`,
+        });
+      }
+    },
   });
   const busy = status === "streaming" || status === "submitted";
 
@@ -107,6 +178,23 @@ export default function Chat() {
     setMemoryChanged(window.localStorage.getItem("pb-memory-changed") === "true");
     setToolChanged(window.localStorage.getItem("pb-tool-changed") === "true");
   }, []);
+
+  // Track only the newest generated image in browser memory. The base64 image
+  // is still stripped from every normal outgoing chat request.
+  useEffect(() => {
+    for (let messageIndex = messages.length - 1; messageIndex >= 0; messageIndex -= 1) {
+      const parts = messages[messageIndex].parts;
+      for (let partIndex = parts.length - 1; partIndex >= 0; partIndex -= 1) {
+        const part = parts[partIndex];
+        if (part.type !== "tool-generateImage") continue;
+        const result = part.output as { ok?: boolean; imageUrl?: string } | undefined;
+        if (part.state === "output-available" && result?.ok && result.imageUrl?.startsWith("data:image/")) {
+          latestImageRef.current = result.imageUrl;
+          return;
+        }
+      }
+    }
+  }, [messages]);
 
   async function loadMemories(search = "") {
     setMemoriesLoading(true);
@@ -260,6 +348,9 @@ export default function Chat() {
             else if (name === "generateImage") {
               success = imageResult?.ok === true;
               summary = success ? "Generated a temporary image" : (imageResult?.error ?? "Image generation failed");
+            } else if (name === "inspectImage") {
+              success = !outputText.startsWith("Image inspection failed:") && !outputText.startsWith("There is no generated image");
+              summary = success ? "Inspected the latest generated image" : outputText;
             }
             if (outputText.startsWith("No memory with ID")) success = false;
           } else if (toolPart.errorText) {
