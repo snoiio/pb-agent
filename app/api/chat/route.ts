@@ -1,6 +1,7 @@
 import { convertToModelMessages, stepCountIs, streamText, tool } from "ai";
 import { createOpenRouter } from "@openrouter/ai-sdk-provider";
 import { z } from "zod";
+import { neon } from "@neondatabase/serverless";
 
 const openrouter = createOpenRouter({
   apiKey: process.env.OPENROUTER_API_KEY,
