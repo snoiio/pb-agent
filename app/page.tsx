@@ -57,13 +57,28 @@ function sanitizeOutgoingMessages(messages: Parameters<NonNullable<ConstructorPa
   }));
 }
 
+function latestGeneratedImage(messages: Array<{ parts: Array<any> }>): string | null {
+  for (let messageIndex = messages.length - 1; messageIndex >= 0; messageIndex -= 1) {
+    const parts = messages[messageIndex].parts;
+    for (let partIndex = parts.length - 1; partIndex >= 0; partIndex -= 1) {
+      const part = parts[partIndex];
+      if (part?.type !== "tool-generateImage") continue;
+      const result = part.output as { ok?: boolean; imageUrl?: string } | undefined;
+      if (part.state === "output-available" && result?.ok && result.imageUrl?.startsWith("data:image/")) {
+        return result.imageUrl;
+      }
+    }
+  }
+  return null;
+}
+
 // Vision only needs a readable copy, not NovelAI's full PNG. Downscaling here
-// keeps the one-off inspection request safely below Vercel's payload limit.
+// keeps the one-off inspection request small and predictable.
 async function prepareImageForInspection(dataUrl: string): Promise<string> {
   return new Promise((resolve, reject) => {
     const image = new Image();
     image.onload = () => {
-      const maxDimension = 1024;
+      const maxDimension = 768;
       const scale = Math.min(1, maxDimension / Math.max(image.naturalWidth, image.naturalHeight));
       const width = Math.max(1, Math.round(image.naturalWidth * scale));
       const height = Math.max(1, Math.round(image.naturalHeight * scale));
@@ -76,7 +91,7 @@ async function prepareImageForInspection(dataUrl: string): Promise<string> {
         return;
       }
       context.drawImage(image, 0, 0, width, height);
-      resolve(canvas.toDataURL("image/jpeg", 0.82));
+      resolve(canvas.toDataURL("image/jpeg", 0.72));
     };
     image.onerror = () => reject(new Error("The latest image could not be prepared for inspection."));
     image.src = dataUrl;
@@ -132,7 +147,7 @@ export default function Chat() {
     async onToolCall({ toolCall }) {
       if (toolCall.dynamic || toolCall.toolName !== "inspectImage") return;
 
-      const imageUrl = latestImageRef.current;
+      const imageUrl = latestGeneratedImage(messages) ?? latestImageRef.current;
       if (!imageUrl) {
         addToolOutput({
           tool: "inspectImage",
@@ -143,16 +158,28 @@ export default function Chat() {
       }
 
       try {
+        latestImageRef.current = imageUrl;
         const inspectionImage = await prepareImageForInspection(imageUrl);
         const input = toolCall.input as { focus?: string };
+        const requestBody = JSON.stringify({
+          imageUrl: inspectionImage,
+          focus: typeof input?.focus === "string" ? input.focus : undefined,
+        });
+        console.log("[PB vision client] request started", {
+          inspectionImageLength: inspectionImage.length,
+          requestBodyLength: requestBody.length,
+        });
+
         const response = await fetch("/api/inspect-image", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            imageUrl: inspectionImage,
-            focus: typeof input?.focus === "string" ? input.focus : undefined,
-          }),
+          body: requestBody,
         });
+        console.log("[PB vision client] response", {
+          status: response.status,
+          ok: response.ok,
+        });
+
         const payload = await response.json() as { ok?: boolean; description?: string; error?: string };
         const output = response.ok && payload.ok && payload.description
           ? payload.description
@@ -164,10 +191,16 @@ export default function Chat() {
           output,
         });
       } catch (inspectionError) {
+        const errorName = inspectionError instanceof Error ? inspectionError.name : "UnknownError";
+        const errorMessage = inspectionError instanceof Error ? inspectionError.message : "Unknown error";
+        console.error("[PB vision client] request exception", {
+          name: errorName,
+          message: errorMessage,
+        });
         addToolOutput({
           tool: "inspectImage",
           toolCallId: toolCall.toolCallId,
-          output: `Image inspection failed: ${inspectionError instanceof Error ? inspectionError.message : "Unknown error"}`,
+          output: `Image inspection failed before an HTTP response: ${errorName}: ${errorMessage}`,
         });
       }
     },
@@ -182,18 +215,8 @@ export default function Chat() {
   // Track only the newest generated image in browser memory. The base64 image
   // is still stripped from every normal outgoing chat request.
   useEffect(() => {
-    for (let messageIndex = messages.length - 1; messageIndex >= 0; messageIndex -= 1) {
-      const parts = messages[messageIndex].parts;
-      for (let partIndex = parts.length - 1; partIndex >= 0; partIndex -= 1) {
-        const part = parts[partIndex];
-        if (part.type !== "tool-generateImage") continue;
-        const result = part.output as { ok?: boolean; imageUrl?: string } | undefined;
-        if (part.state === "output-available" && result?.ok && result.imageUrl?.startsWith("data:image/")) {
-          latestImageRef.current = result.imageUrl;
-          return;
-        }
-      }
-    }
+    const imageUrl = latestGeneratedImage(messages);
+    if (imageUrl) latestImageRef.current = imageUrl;
   }, [messages]);
 
   async function loadMemories(search = "") {
@@ -349,7 +372,7 @@ export default function Chat() {
               success = imageResult?.ok === true;
               summary = success ? "Generated a temporary image" : (imageResult?.error ?? "Image generation failed");
             } else if (name === "inspectImage") {
-              success = !outputText.startsWith("Image inspection failed:") && !outputText.startsWith("There is no generated image");
+              success = !outputText.startsWith("Image inspection failed") && !outputText.startsWith("There is no generated image");
               summary = success ? "Inspected the latest generated image" : outputText;
             }
             if (outputText.startsWith("No memory with ID")) success = false;
