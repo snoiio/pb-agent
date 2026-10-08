@@ -31,6 +31,10 @@ export default function Memories() {
   }
 
   useEffect(() => {
+    window.localStorage.removeItem("pb-memory-changed");
+  }, []);
+
+  useEffect(() => {
     const timer = window.setTimeout(() => loadMemories(query), 250);
     return () => window.clearTimeout(timer);
   }, [query]);
