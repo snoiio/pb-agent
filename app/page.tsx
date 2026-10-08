@@ -36,6 +36,27 @@ type ResponseEvent = {
 
 type LogEvent = ToolEvent | ResponseEvent;
 
+// Keep generated images in the visible chat, but never resend their base64 bytes.
+function sanitizeOutgoingMessages(messages: Parameters<NonNullable<ConstructorParameters<typeof DefaultChatTransport>[0]>["prepareSendMessagesRequest"]>[0]["messages"]) {
+  return messages.map((message) => ({
+    ...message,
+    parts: message.parts.map((part) => {
+      if (
+        part.type !== "tool-generateImage" ||
+        !("output" in part) ||
+        !part.output ||
+        typeof part.output !== "object" ||
+        !("imageUrl" in part.output)
+      ) {
+        return part;
+      }
+
+      const { imageUrl: _imageUrl, ...safeOutput } = part.output;
+      return { ...part, output: { ...safeOutput, imageGenerated: true } };
+    }),
+  }));
+}
+
 const toolIcons: Record<string, string> = {
   remember: "🗄️",
   recall: "🔎",
@@ -72,6 +93,12 @@ export default function Chat() {
     transport: new DefaultChatTransport({
       api: "/api/chat",
       body: { timeZone },
+      prepareSendMessagesRequest: ({ messages }) => ({
+        body: {
+          messages: sanitizeOutgoingMessages(messages),
+          timeZone,
+        },
+      }),
     }),
   });
   const busy = status === "streaming" || status === "submitted";
