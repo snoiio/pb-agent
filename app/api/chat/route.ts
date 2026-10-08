@@ -289,9 +289,14 @@ export async function POST(req: Request) {
         description: "Generate one temporary illustration to display in chat. You choose its subject and art style, including how to depict yourself. Use only when requested or genuinely useful. You cannot visually inspect the result.",
         inputSchema: z.object({ prompt: z.string().min(1).max(1800) }),
         execute: async ({ prompt }) => generateTemporaryImage(prompt),
-        toModelOutput: ({ output }) => ({
+        toModelOutput: (output) => ({
           type: "text" as const,
-          value: output.ok ? "Image generated and shown to the human. You have not visually inspected it." : output.error ?? "Image generation failed.",
+          value:
+            output && typeof output === "object" && "ok" in output && output.ok
+              ? "Image generated and shown to the human. You have not visually inspected it."
+              : output && typeof output === "object" && "error" in output && typeof output.error === "string"
+                ? output.error
+                : "Image generation failed.",
         }),
       }),
       remember: tool({
