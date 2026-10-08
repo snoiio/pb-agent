@@ -214,8 +214,13 @@ async function systemPrompt(timeZone?: string): Promise<string> {
 
 async function generateTemporaryImage(prompt: string) {
   const apiKey = process.env.OPENROUTER_API_KEY;
-  if (!apiKey) return { ok: false, error: "Image generation is not configured." };
+  console.log("[PB image] execute started", { promptLength: prompt.length });
+  if (!apiKey) {
+    console.error("[PB image] Missing API key");
+    return { ok: false, error: "Image generation is not configured." };
+  }
   try {
+    console.log("[PB image] provider request started");
     const response = await fetch("https://openrouter.ai/api/v1/images", {
       method: "POST",
       headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
@@ -228,13 +233,16 @@ async function generateTemporaryImage(prompt: string) {
       }),
       signal: AbortSignal.timeout(60000),
     });
+    console.log("[PB image] provider response", { status: response.status, ok: response.ok });
     if (!response.ok) return { ok: false, error: `Image provider returned HTTP ${response.status}.` };
     const payload = await response.json() as { data?: Array<{ b64_json?: string; media_type?: string }> };
     const image = payload.data?.[0];
+    console.log("[PB image] parsed response", { hasImage: Boolean(image?.b64_json), imageCount: payload.data?.length ?? 0 });
     if (!image?.b64_json) return { ok: false, error: "No image was returned." };
     const mime = ["image/png", "image/jpeg", "image/webp"].includes(image.media_type ?? "") ? image.media_type : "image/png";
     return { ok: true, prompt, createdAt: new Date().toISOString(), imageUrl: `data:${mime};base64,${image.b64_json}` };
-  } catch {
+  } catch (error) {
+    console.error("[PB image] request exception", { name: error instanceof Error ? error.name : "Unknown", message: error instanceof Error ? error.message : "Unknown error" });
     return { ok: false, error: "Image generation timed out or failed." };
   }
 }
