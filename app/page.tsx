@@ -1,11 +1,13 @@
 'use client';
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport } from "ai";
 
 export default function Chat() {
   const [input, setInput] = useState("");
+  const [memoryNotice, setMemoryNotice] = useState(false);
+  const seenMemoryToolCalls = useRef(new Set<string>());
   const timeZone =
     typeof Intl !== "undefined"
       ? Intl.DateTimeFormat().resolvedOptions().timeZone
@@ -19,9 +21,60 @@ export default function Chat() {
   });
   const busy = status === "streaming" || status === "submitted";
 
+  useEffect(() => {
+    let foundNewMemory = false;
+
+    for (const message of messages) {
+      for (const part of message.parts) {
+        const toolPart = part as {
+          type?: string;
+          toolCallId?: string;
+          state?: string;
+          output?: unknown;
+        };
+
+        if (
+          toolPart.type === "tool-remember" &&
+          toolPart.state === "output-available" &&
+          typeof toolPart.output === "string" &&
+          toolPart.output.startsWith("Memory created:") &&
+          toolPart.toolCallId &&
+          !seenMemoryToolCalls.current.has(toolPart.toolCallId)
+        ) {
+          seenMemoryToolCalls.current.add(toolPart.toolCallId);
+          foundNewMemory = true;
+        }
+      }
+    }
+
+    if (!foundNewMemory) return;
+
+    setMemoryNotice(true);
+    const timer = window.setTimeout(() => setMemoryNotice(false), 2500);
+    return () => window.clearTimeout(timer);
+  }, [messages]);
+
   return (
     <div style={{ maxWidth: 640, margin: "0 auto", padding: 16, display: "flex", flexDirection: "column", height: "100dvh" }}>
       <h1 style={{ fontSize: 20 }}>🍬 Princess Bubblegum</h1>
+      {memoryNotice && (
+        <div
+          style={{
+            position: "fixed",
+            top: 16,
+            left: "50%",
+            transform: "translateX(-50%)",
+            zIndex: 1000,
+            padding: "8px 12px",
+            borderRadius: 999,
+            background: "#2d2d44",
+            boxShadow: "0 4px 16px rgba(0,0,0,0.3)",
+            fontSize: 14,
+          }}
+        >
+          🧠 Memory saved
+        </div>
+      )}
       <div style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column", gap: 8 }}>
         {messages.map((m) => (
           <div key={m.id} style={{
