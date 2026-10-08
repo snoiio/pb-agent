@@ -308,6 +308,107 @@ async function generateTemporaryImage(prompt: string) {
 }
 
 
+
+// NovelAI is the active image backend. The OpenRouter implementation above
+// remains available for a future provider switch.
+async function generateNovelAIImage(prompt: string) {
+  const token = process.env.NOVELAI_API_TOKEN;
+  if (!token) return { ok: false, error: "NovelAI API token is not configured." };
+
+  const model = "nai-diffusion-4-5-full";
+  const negativePrompt = "lowres, blurry, bad anatomy, bad hands, text, watermark";
+  const caption = { base_caption: prompt, char_captions: [] };
+  const payload = {
+    input: prompt,
+    model,
+    action: "generate",
+    parameters: {
+      params_version: 3,
+      width: 832,
+      height: 1216,
+      steps: 28,
+      n_samples: 1,
+      sampler: "k_euler_ancestral",
+      scale: 5,
+      noise_schedule: "karras",
+      negative_prompt: negativePrompt,
+      qualityToggle: false,
+      ucPreset: 4,
+      v4_prompt: { caption, use_coords: false, use_order: true },
+      v4_negative_prompt: {
+        caption: { base_caption: negativePrompt, char_captions: [] },
+        legacy_uc: false,
+      },
+    },
+  };
+
+  try {
+    console.log("[PB image] NovelAI request", { model, promptLength: prompt.length });
+    const response = await fetch("https://image.novelai.net/ai/generate-image", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+        Accept: "application/x-zip-compressed",
+      },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(120000),
+    });
+    if (!response.ok) {
+      const detail = (await response.text().catch(() => "")).replace(/[\r\n]+/g, " ").slice(0, 700);
+      console.error("[PB image] NovelAI rejected request", { status: response.status, detail });
+      return { ok: false, error: `NovelAI returned HTTP ${response.status}${detail ? `: ${detail}` : ""}` };
+    }
+
+    // NovelAI returns a ZIP archive containing image_0.png.
+    // Read its central directory rather than assuming the local header
+    // contains sizes (ZIP writers may use data descriptors).
+    const zip = Buffer.from(await response.arrayBuffer());
+    const { inflateRawSync } = await import("node:zlib");
+    let end = -1;
+    for (let i = zip.length - 22; i >= Math.max(0, zip.length - 65557); i--) {
+      if (zip.readUInt32LE(i) === 0x06054b50) { end = i; break; }
+    }
+    if (end < 0) throw new Error("NovelAI returned an invalid ZIP archive");
+    const entryCount = zip.readUInt16LE(end + 10);
+    let offset = zip.readUInt32LE(end + 16);
+    let image: Buffer | undefined;
+    for (let i = 0; i < entryCount; i++) {
+      if (zip.readUInt32LE(offset) !== 0x02014b50) throw new Error("Invalid ZIP directory");
+      const method = zip.readUInt16LE(offset + 10);
+      const compressedSize = zip.readUInt32LE(offset + 20);
+      const filenameLength = zip.readUInt16LE(offset + 28);
+      const extraLength = zip.readUInt16LE(offset + 30);
+      const commentLength = zip.readUInt16LE(offset + 32);
+      const localOffset = zip.readUInt32LE(offset + 42);
+      const filename = zip.subarray(offset + 46, offset + 46 + filenameLength).toString("utf8");
+      if (/\.png$/i.test(filename)) {
+        if (zip.readUInt32LE(localOffset) !== 0x04034b50) throw new Error("Invalid ZIP image header");
+        const dataStart = localOffset + 30 + zip.readUInt16LE(localOffset + 26) + zip.readUInt16LE(localOffset + 28);
+        const compressed = zip.subarray(dataStart, dataStart + compressedSize);
+        if (method !== 0 && method !== 8) throw new Error("Unsupported ZIP compression");
+        image = method === 8 ? inflateRawSync(compressed) : compressed;
+        break;
+      }
+      offset += 46 + filenameLength + extraLength + commentLength;
+    }
+    if (!image || image.length === 0) throw new Error("NovelAI returned no PNG image");
+    console.log("[PB image] NovelAI success", { imageBytes: image.length });
+    return {
+      ok: true,
+      prompt,
+      createdAt: new Date().toISOString(),
+      imageUrl: `data:image/png;base64,${image.toString("base64")}`,
+    };
+  } catch (error) {
+    console.error("[PB image] NovelAI exception", {
+      message: error instanceof Error ? error.message : "Unknown error",
+    });
+    return { ok: false, error: "NovelAI image generation failed or timed out." };
+  }
+}
+
+
 export async function POST(req: Request) {
   const { messages, timeZone } = await req.json();
   const humanTimeZone = validTimeZone(timeZone);
@@ -324,7 +425,7 @@ export async function POST(req: Request) {
       generateImage: tool({
         description: "Generate one temporary illustration to display in chat. You choose its subject and art style, including how to depict yourself. Use only when requested or genuinely useful. You cannot visually inspect the result.",
         inputSchema: z.object({ prompt: z.string().min(1).max(1800) }),
-        execute: async ({ prompt }) => generateTemporaryImage(prompt),
+        execute: async ({ prompt }) => generateNovelAIImage(prompt),
         toModelOutput: (output) => ({
           type: "text" as const,
           value:
