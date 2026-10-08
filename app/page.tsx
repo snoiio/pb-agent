@@ -19,6 +19,20 @@ type ToolEvent = {
   success: boolean;
 };
 
+type ResponseEvent = {
+  id: string;
+  timestamp: string;
+  kind: "assistant-response";
+  messageId: string;
+  textLength: number;
+  partTypes: string[];
+  status: string;
+  error: string | null;
+  blank: boolean;
+};
+
+type LogEvent = ToolEvent | ResponseEvent;
+
 const toolIcons: Record<string, string> = {
   remember: "🗄️",
   recall: "🔎",
@@ -40,7 +54,8 @@ export default function Chat() {
   const [editText, setEditText] = useState("");
   const [expandedId, setExpandedId] = useState<number | null>(null);
 
-  const [toolEvents, setToolEvents] = useState<ToolEvent[]>([]);
+  const [toolEvents, setToolEvents] = useState<LogEvent[]>([]);
+  const seenResponses = useRef(new Set<string>());
 
   const seenMemoryToolCalls = useRef(new Set<string>());
   const seenToolCalls = useRef(new Set<string>());
@@ -49,7 +64,7 @@ export default function Chat() {
       ? Intl.DateTimeFormat().resolvedOptions().timeZone
       : undefined;
 
-  const { messages, sendMessage, status } = useChat({
+  const { messages, sendMessage, status, error } = useChat({
     transport: new DefaultChatTransport({
       api: "/api/chat",
       body: { timeZone },
@@ -140,6 +155,39 @@ export default function Chat() {
   }
 
   useEffect(() => {
+    if (status !== "ready" && status !== "error") return;
+    const assistant = [...messages].reverse().find((message) => message.role === "assistant");
+    if (!assistant || seenResponses.current.has(assistant.id)) return;
+    seenResponses.current.add(assistant.id);
+    const textLength = assistant.parts.reduce((sum, part) => sum + (part.type === "text" ? part.text.length : 0), 0);
+    const entry: ResponseEvent = {
+      id: `response-${assistant.id}`,
+      timestamp: new Date().toISOString(),
+      kind: "assistant-response",
+      messageId: assistant.id,
+      textLength,
+      partTypes: assistant.parts.map((part) => part.type),
+      status,
+      error: error?.message ?? null,
+      blank: textLength === 0,
+    };
+    try {
+      const stored = JSON.parse(window.localStorage.getItem("pb-tool-log") ?? "[]");
+      const existing: LogEvent[] = Array.isArray(stored) ? stored : [];
+      const updated = [entry, ...existing].slice(0, 50);
+      window.localStorage.setItem("pb-tool-log", JSON.stringify(updated));
+      if (panel === "tools") setToolEvents(updated);
+    } catch {
+      window.localStorage.setItem("pb-tool-log", JSON.stringify([entry]));
+      if (panel === "tools") setToolEvents([entry]);
+    }
+    if (panel !== "tools") {
+      window.localStorage.setItem("pb-tool-changed", "true");
+      setToolChanged(true);
+    }
+  }, [messages, status, error, panel]);
+
+  useEffect(() => {
     let notice: string | null = null;
 
     for (const message of messages) {
@@ -188,7 +236,11 @@ export default function Chat() {
             window.localStorage.setItem("pb-tool-log", JSON.stringify([entry]));
           }
           window.localStorage.setItem("pb-tool-changed", "true");
-          setToolChanged(true);
+          if (panel === "tools") {
+            setToolEvents(JSON.parse(window.localStorage.getItem("pb-tool-log") ?? "[]"));
+          } else {
+            setToolChanged(true);
+          }
           seenToolCalls.current.add(toolPart.toolCallId);
         }
 
@@ -304,12 +356,26 @@ export default function Chat() {
                   <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
                     {toolEvents.map((event) => (
                       <section key={event.id} style={{ background: "#2d2d44", borderRadius: 14, padding: 14 }}>
+                        {"kind" in event ? (
+                          <>
+                            <div style={{ fontWeight: 700 }}>💬 Assistant Response {event.blank ? "· Blank" : ""}</div>
+                            <div style={{ fontSize: 12, opacity: 0.55, marginTop: 6 }}>{formatDate(event.timestamp, true)}</div>
+                            <div style={{ marginTop: 8, lineHeight: 1.5 }}>Browser text length: {event.textLength}</div>
+                            <div style={{ lineHeight: 1.5 }}>Message parts: {JSON.stringify(event.partTypes)}</div>
+                            <div style={{ lineHeight: 1.5 }}>Chat status: {event.status}</div>
+                            <div style={{ lineHeight: 1.5 }}>Error: {event.error ?? "None reported"}</div>
+                            <div style={{ fontSize: 12, opacity: 0.55, marginTop: 6, overflowWrap: "anywhere" }}>Message ID: {event.messageId}</div>
+                          </>
+                        ) : (
+                          <>
                         <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "flex-start" }}>
                           <div style={{ fontWeight: 700 }}>{toolIcons[event.name] ?? "🔧"} {event.name}</div>
                           <div style={{ fontSize: 12, opacity: 0.55, textAlign: "right" }}>{formatDate(event.timestamp, true)}</div>
                         </div>
                         <div style={{ marginTop: 8, lineHeight: 1.4 }}>{event.summary}</div>
                         {!event.success && <div style={{ marginTop: 8, fontSize: 12, opacity: 0.7 }}>Failed</div>}
+                          </>
+                        )}
                       </section>
                     ))}
                   </div>
