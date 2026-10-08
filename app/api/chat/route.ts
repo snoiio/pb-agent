@@ -229,12 +229,24 @@ async function generateTemporaryImage(prompt: string) {
         prompt,
         n: 1,
         aspect_ratio: "1:1",
-        size: "256x256",
       }),
       signal: AbortSignal.timeout(60000),
     });
     console.log("[PB image] provider response", { status: response.status, ok: response.ok });
-    if (!response.ok) return { ok: false, error: `Image provider returned HTTP ${response.status}.` };
+    if (!response.ok) {
+      // Error responses contain no image bytes; log only a bounded provider message.
+      const rawError = await response.text().catch(() => "");
+      let providerMessage = "";
+      try {
+        const parsed = JSON.parse(rawError) as { error?: { message?: string } | string; message?: string };
+        providerMessage = typeof parsed.error === "string" ? parsed.error : parsed.error?.message ?? parsed.message ?? "";
+      } catch {
+        providerMessage = rawError;
+      }
+      const safeMessage = providerMessage.replace(/[\r\n]+/g, " ").slice(0, 300);
+      console.error("[PB image] provider error", { status: response.status, message: safeMessage || "No details returned" });
+      return { ok: false, error: `Image provider returned HTTP ${response.status}${safeMessage ? `: ${safeMessage}` : "."}` };
+    }
     const payload = await response.json() as { data?: Array<{ b64_json?: string; media_type?: string }> };
     const image = payload.data?.[0];
     console.log("[PB image] parsed response", { hasImage: Boolean(image?.b64_json), imageCount: payload.data?.length ?? 0 });
