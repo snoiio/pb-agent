@@ -214,7 +214,7 @@ async function systemPrompt(timeZone?: string): Promise<string> {
 
 async function generateTemporaryImage(prompt: string) {
   const apiKey = process.env.OPENROUTER_API_KEY;
-  const model = "black-forest-labs/flux.2-klein-4b";
+  const model = "bytedance-seed/seedream-4.5";
   console.log("[PB image] execute started", { promptLength: prompt.length });
   if (!apiKey) {
     console.error("[PB image] Missing API key");
