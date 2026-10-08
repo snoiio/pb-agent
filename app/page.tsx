@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useChat } from "@ai-sdk/react";
+import Link from "next/link";
 import { DefaultChatTransport } from "ai";
 
 export default function Chat() {
@@ -74,7 +75,17 @@ export default function Chat() {
 
   return (
     <div style={{ maxWidth: 640, margin: "0 auto", padding: 16, display: "flex", flexDirection: "column", height: "100dvh" }}>
-      <h1 style={{ fontSize: 20 }}>🍬 Princess Bubblegum</h1>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+        <h1 style={{ fontSize: 20 }}>🍬 Princess Bubblegum</h1>
+        <Link
+          href="/memories"
+          aria-label="Browse memories"
+          title="Memories"
+          style={{ color: "#eee", textDecoration: "none", fontSize: 22, padding: 8 }}
+        >
+          🗄️
+        </Link>
+      </div>
       {memoryNotice && (
         <div
           style={{
