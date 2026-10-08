@@ -58,6 +58,13 @@ export async function POST(req: Request) {
     .filter(Boolean)
     .join("\n");
 
+  const startedAt = Date.now();
+  console.log("[PB vision] provider request started", {
+    model: VISION_MODEL,
+    imageDataUrlLength: imageUrl.length,
+    focusLength: focus.length,
+  });
+
   try {
     const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
       method: "POST",
@@ -76,15 +83,26 @@ export async function POST(req: Request) {
             ],
           },
         ],
+        reasoning: { enabled: false },
         temperature: 0.2,
-        max_tokens: 500,
+        max_tokens: 900,
       }),
       signal: AbortSignal.timeout(90000),
     });
 
+    console.log("[PB vision] provider response", {
+      status: response.status,
+      ok: response.ok,
+      elapsedMs: Date.now() - startedAt,
+    });
+
     if (!response.ok) {
       const detail = (await response.text().catch(() => "")).replace(/[\r\n]+/g, " ").slice(0, 700);
-      console.error("[PB vision] provider failure", { status: response.status, detail });
+      console.error("[PB vision] provider failure", {
+        status: response.status,
+        elapsedMs: Date.now() - startedAt,
+        detail,
+      });
       return Response.json(
         { ok: false, error: `Vision provider returned HTTP ${response.status}${detail ? `: ${detail}` : ""}` },
         { status: 502 },
@@ -110,6 +128,7 @@ export async function POST(req: Request) {
     if (!description) {
       console.warn("[PB vision] empty description", {
         model: VISION_MODEL,
+        elapsedMs: Date.now() - startedAt,
         hasChoice: Boolean(choice),
         finishReason: choice?.finish_reason ?? null,
         messageKeys: message ? Object.keys(message) : [],
@@ -122,11 +141,14 @@ export async function POST(req: Request) {
 
     console.log("[PB vision] inspection complete", {
       model: VISION_MODEL,
+      elapsedMs: Date.now() - startedAt,
       descriptionLength: description.length,
     });
     return Response.json({ ok: true, description });
   } catch (error) {
     console.error("[PB vision] request exception", {
+      elapsedMs: Date.now() - startedAt,
+      name: error instanceof Error ? error.name : "Unknown",
       message: error instanceof Error ? error.message : "Unknown error",
     });
     return Response.json({ ok: false, error: "Image inspection timed out or failed." }, { status: 502 });
