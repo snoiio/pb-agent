@@ -6,8 +6,16 @@ import { DefaultChatTransport } from "ai";
 
 export default function Chat() {
   const [input, setInput] = useState("");
+  const timeZone =
+    typeof Intl !== "undefined"
+      ? Intl.DateTimeFormat().resolvedOptions().timeZone
+      : undefined;
+
   const { messages, sendMessage, status } = useChat({
-    transport: new DefaultChatTransport({ api: "/api/chat" }),
+    transport: new DefaultChatTransport({
+      api: "/api/chat",
+      body: { timeZone },
+    }),
   });
   const busy = status === "streaming" || status === "submitted";
 
