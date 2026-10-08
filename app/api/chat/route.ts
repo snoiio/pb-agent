@@ -212,6 +212,34 @@ async function systemPrompt(timeZone?: string): Promise<string> {
 // CHAT
 // ---------------------------------------------------------------
 
+async function generateTemporaryImage(prompt: string) {
+  const apiKey = process.env.OPENROUTER_API_KEY;
+  if (!apiKey) return { ok: false, error: "Image generation is not configured." };
+  try {
+    const response = await fetch("https://openrouter.ai/api/v1/images", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "black-forest-labs/flux.2-klein-4b",
+        prompt,
+        n: 1,
+        aspect_ratio: "1:1",
+        size: "256x256",
+      }),
+      signal: AbortSignal.timeout(60000),
+    });
+    if (!response.ok) return { ok: false, error: `Image provider returned HTTP ${response.status}.` };
+    const payload = await response.json() as { data?: Array<{ b64_json?: string; media_type?: string }> };
+    const image = payload.data?.[0];
+    if (!image?.b64_json) return { ok: false, error: "No image was returned." };
+    const mime = ["image/png", "image/jpeg", "image/webp"].includes(image.media_type ?? "") ? image.media_type : "image/png";
+    return { ok: true, prompt, createdAt: new Date().toISOString(), imageUrl: `data:${mime};base64,${image.b64_json}` };
+  } catch {
+    return { ok: false, error: "Image generation timed out or failed." };
+  }
+}
+
+
 export async function POST(req: Request) {
   const { messages, timeZone } = await req.json();
   const humanTimeZone = validTimeZone(timeZone);
@@ -224,6 +252,15 @@ export async function POST(req: Request) {
     messages: convertToModelMessages(messages),
 
     tools: {
+      generateImage: tool({
+        description: "Generate one temporary illustration to display in chat. You choose its subject and art style, including how to depict yourself. Use only when requested or genuinely useful. You cannot visually inspect the result.",
+        inputSchema: z.object({ prompt: z.string().min(1).max(1800) }),
+        execute: async ({ prompt }) => generateTemporaryImage(prompt),
+        toModelOutput: ({ output }) => ({
+          type: "text" as const,
+          value: output.ok ? "Image generated and shown to the human. You have not visually inspected it." : output.error ?? "Image generation failed.",
+        }),
+      }),
       remember: tool({
         description:
           "Create a new long-term memory for meaningful information worth keeping across conversations. Avoid duplicates; update an existing memory instead when information changes.",
