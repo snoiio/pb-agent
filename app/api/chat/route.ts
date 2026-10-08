@@ -214,39 +214,52 @@ async function systemPrompt(timeZone?: string): Promise<string> {
 
 async function generateTemporaryImage(prompt: string) {
   const apiKey = process.env.OPENROUTER_API_KEY;
+  const model = "black-forest-labs/flux.2-klein-4b";
   console.log("[PB image] execute started", { promptLength: prompt.length });
   if (!apiKey) {
     console.error("[PB image] Missing API key");
     return { ok: false, error: "Image generation is not configured." };
   }
   try {
-    console.log("[PB image] provider request started");
+    console.log("[PB image] provider request started", {
+      model,
+      fields: ["model", "prompt"],
+      promptLength: prompt.length,
+    });
     const response = await fetch("https://openrouter.ai/api/v1/images", {
       method: "POST",
       headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        model: "black-forest-labs/flux.2-klein-4b",
-        prompt,
-        n: 1,
-        aspect_ratio: "1:1",
-      }),
+      body: JSON.stringify({ model, prompt }),
       signal: AbortSignal.timeout(60000),
     });
-    console.log("[PB image] provider response", { status: response.status, ok: response.ok });
+
     if (!response.ok) {
-      // Error responses contain no image bytes; log only a bounded provider message.
-      const rawError = await response.text().catch(() => "");
-      let providerMessage = "";
-      try {
-        const parsed = JSON.parse(rawError) as { error?: { message?: string } | string; message?: string };
-        providerMessage = typeof parsed.error === "string" ? parsed.error : parsed.error?.message ?? parsed.message ?? "";
-      } catch {
-        providerMessage = rawError;
-      }
-      const safeMessage = providerMessage.replace(/[\r\n]+/g, " ").slice(0, 300);
-      console.error("[PB image] provider error", { status: response.status, message: safeMessage || "No details returned" });
-      return { ok: false, error: `Image provider returned HTTP ${response.status}${safeMessage ? `: ${safeMessage}` : "."}` };
+      const contentType = response.headers.get("content-type");
+      const rawBody = await response.text().catch((error) =>
+        `[failed to read response body: ${error instanceof Error ? error.message : "unknown error"}]`
+      );
+      const safeBody = rawBody.replace(/[\r\n]+/g, " ").slice(0, 1000);
+      console.log("[PB image] provider failure", {
+        status: response.status,
+        statusText: response.statusText,
+        contentType,
+        body: safeBody || "(empty response body)",
+        request: {
+          model,
+          fields: ["model", "prompt"],
+          promptLength: prompt.length,
+        },
+      });
+      return {
+        ok: false,
+        error: `Image provider returned HTTP ${response.status}${safeBody ? `: ${safeBody}` : "."}`,
+      };
     }
+
+    console.log("[PB image] provider success", {
+      status: response.status,
+      contentType: response.headers.get("content-type"),
+    });
     const payload = await response.json() as { data?: Array<{ b64_json?: string; media_type?: string }> };
     const image = payload.data?.[0];
     console.log("[PB image] parsed response", { hasImage: Boolean(image?.b64_json), imageCount: payload.data?.length ?? 0 });
