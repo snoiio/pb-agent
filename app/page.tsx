@@ -28,7 +28,7 @@ type ResponseEvent = {
   messageId: string;
   textLength: number;
   partTypes: string[];
-  toolStates: string[];
+  toolStates?: string[];
   status: string;
   error: string | null;
   blank: boolean;
@@ -385,22 +385,22 @@ export default function Chat() {
                             <div style={{ fontWeight: 700 }}>💬 Assistant Response {event.blank ? "· Blank" : ""}</div>
                             <div style={{ fontSize: 12, opacity: 0.55, marginTop: 6 }}>{formatDate(event.timestamp, true)}</div>
                             <div style={{ marginTop: 8, lineHeight: 1.5 }}>Browser text length: {event.textLength}</div>
-                            <div style={{ lineHeight: 1.5 }}>Message parts: {JSON.stringify(event.partTypes)}</div>
-                            <div style={{ lineHeight: 1.5 }}>Tool states: {event.toolStates.length ? JSON.stringify(event.toolStates) : "None"}</div>
-                            <div style={{ lineHeight: 1.5 }}>Chat status: {event.status}</div>
+                            <div style={{ lineHeight: 1.5 }}>Message parts: {JSON.stringify(event.partTypes ?? [])}</div>
+                            <div style={{ lineHeight: 1.5 }}>Tool states: {(event.toolStates?.length ?? 0) ? JSON.stringify(event.toolStates) : "None"}</div>
+                            <div style={{ lineHeight: 1.5 }}>Chat status: {event.status ?? "unknown"}</div>
                             <div style={{ lineHeight: 1.5 }}>Error: {event.error ?? "None reported"}</div>
-                            <div style={{ fontSize: 12, opacity: 0.55, marginTop: 6, overflowWrap: "anywhere" }}>Message ID: {event.messageId}</div>
+                            <div style={{ fontSize: 12, opacity: 0.55, marginTop: 6, overflowWrap: "anywhere" }}>Message ID: {event.messageId ?? "unknown"}</div>
                           </>
                         ) : (
                           <>
                             <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "flex-start" }}>
-                              <div style={{ fontWeight: 700 }}>{toolIcons[event.name] ?? "🔧"} {event.name}</div>
+                              <div style={{ fontWeight: 700 }}>{toolIcons[event.name] ?? "🔧"} {event.name ?? "unknown tool"}</div>
                               <div style={{ fontSize: 12, opacity: 0.55, textAlign: "right" }}>{formatDate(event.timestamp, true)}</div>
                             </div>
-                            <div style={{ marginTop: 8, lineHeight: 1.4 }}>{event.summary}</div>
+                            <div style={{ marginTop: 8, lineHeight: 1.4 }}>{typeof event.summary === "string" ? event.summary : "Tool event"}</div>
                             {event.state && <div style={{ marginTop: 6, fontSize: 12, opacity: 0.7 }}>State: {event.state}</div>}
                             {event.error && <div style={{ marginTop: 6, fontSize: 12, opacity: 0.7 }}>Error: {event.error}</div>}
-                            {!event.success && <div style={{ marginTop: 8, fontSize: 12, opacity: 0.7 }}>Failed</div>}
+                            {event.success === false && <div style={{ marginTop: 8, fontSize: 12, opacity: 0.7 }}>Failed</div>}
                           </>
                         )}
                       </section>
