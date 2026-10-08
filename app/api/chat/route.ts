@@ -212,6 +212,41 @@ async function systemPrompt(timeZone?: string): Promise<string> {
 // CHAT
 // ---------------------------------------------------------------
 
+function sanitizeImageOutputs(messages: any[]) {
+  let sanitizedCount = 0;
+
+  const sanitizedMessages = messages.map((message) => ({
+    ...message,
+    parts: Array.isArray(message.parts)
+      ? message.parts.map((part: any) => {
+          if (
+            part?.type !== "tool-generateImage" ||
+            !part.output ||
+            typeof part.output !== "object" ||
+            !("imageUrl" in part.output)
+          ) {
+            return part;
+          }
+
+          sanitizedCount += 1;
+          const safeOutput = { ...part.output };
+          delete safeOutput.imageUrl;
+
+          return {
+            ...part,
+            output: {
+              ...safeOutput,
+              imageGenerated: true,
+            },
+          };
+        })
+      : message.parts,
+  }));
+
+  console.log("[PB context] sanitized image outputs", { count: sanitizedCount });
+  return sanitizedMessages;
+}
+
 async function generateTemporaryImage(prompt: string) {
   const apiKey = process.env.OPENROUTER_API_KEY;
   const model = "bytedance-seed/seedream-4.5";
@@ -276,13 +311,14 @@ async function generateTemporaryImage(prompt: string) {
 export async function POST(req: Request) {
   const { messages, timeZone } = await req.json();
   const humanTimeZone = validTimeZone(timeZone);
+  const sanitizedMessages = sanitizeImageOutputs(messages);
 
   const result = streamText({
     model: openrouter.chat("deepseek/deepseek-v4-flash"),
 
     system: await systemPrompt(humanTimeZone),
 
-    messages: convertToModelMessages(messages),
+    messages: convertToModelMessages(sanitizedMessages),
 
     tools: {
       generateImage: tool({
