@@ -9,7 +9,9 @@ export default function Chat() {
   const [input, setInput] = useState("");
   const [memoryNotice, setMemoryNotice] = useState<string | null>(null);
   const [memoryChanged, setMemoryChanged] = useState(false);
+  const [toolChanged, setToolChanged] = useState(false);
   const seenMemoryToolCalls = useRef(new Set<string>());
+  const seenToolCalls = useRef(new Set<string>());
   const timeZone =
     typeof Intl !== "undefined"
       ? Intl.DateTimeFormat().resolvedOptions().timeZone
@@ -25,6 +27,7 @@ export default function Chat() {
 
   useEffect(() => {
     setMemoryChanged(window.localStorage.getItem("pb-memory-changed") === "true");
+    setToolChanged(window.localStorage.getItem("pb-tool-changed") === "true");
   }, []);
 
   useEffect(() => {
@@ -37,16 +40,44 @@ export default function Chat() {
           toolCallId?: string;
           state?: string;
           output?: unknown;
+          input?: unknown;
         };
 
         if (
           toolPart.state !== "output-available" ||
           typeof toolPart.output !== "string" ||
-          !toolPart.toolCallId ||
-          seenMemoryToolCalls.current.has(toolPart.toolCallId)
+          !toolPart.toolCallId
         ) {
           continue;
         }
+
+        if (!seenToolCalls.current.has(toolPart.toolCallId) && toolPart.type?.startsWith("tool-")) {
+          const name = toolPart.type.slice(5);
+          const input = toolPart.input as { keyword?: string } | undefined;
+          let summary = "Tool completed";
+          let success = true;
+
+          if (name === "remember") summary = toolPart.output.startsWith("Memory created:") ? "Memory created" : toolPart.output;
+          else if (name === "recall") summary = input?.keyword ? `Searched memory for "${input.keyword}"` : "Searched memory";
+          else if (name === "updateMemory") summary = toolPart.output.startsWith("Memory updated:") ? "Memory updated" : toolPart.output;
+          else if (name === "forget") summary = toolPart.output.startsWith("Memory deleted:") ? "Memory deleted" : toolPart.output;
+
+          if (toolPart.output.startsWith("No memory with ID")) success = false;
+
+          const entry = { id: toolPart.toolCallId, timestamp: new Date().toISOString(), name, summary, success };
+          try {
+            const existing = JSON.parse(window.localStorage.getItem("pb-tool-log") ?? "[]");
+            const log = Array.isArray(existing) ? existing : [];
+            window.localStorage.setItem("pb-tool-log", JSON.stringify([entry, ...log].slice(0, 50)));
+          } catch {
+            window.localStorage.setItem("pb-tool-log", JSON.stringify([entry]));
+          }
+          window.localStorage.setItem("pb-tool-changed", "true");
+          setToolChanged(true);
+          seenToolCalls.current.add(toolPart.toolCallId);
+        }
+
+        if (seenMemoryToolCalls.current.has(toolPart.toolCallId)) continue;
 
         if (
           toolPart.type === "tool-remember" &&
@@ -84,6 +115,18 @@ export default function Chat() {
     <div style={{ maxWidth: 640, margin: "0 auto", padding: 16, display: "flex", flexDirection: "column", height: "100dvh" }}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
         <h1 style={{ fontSize: 20 }}>🍬 Princess Bubblegum</h1>
+        <div style={{ display: "flex", alignItems: "center" }}>
+        <Link
+          href="/tools"
+          aria-label="View tool log"
+          title="Tool log"
+          style={{ color: "#eee", textDecoration: "none", fontSize: 22, padding: 8, position: "relative", display: "inline-block" }}
+        >
+          🔧
+          {toolChanged && (
+            <span aria-hidden="true" style={{ position: "absolute", top: 5, right: 4, width: 8, height: 8, borderRadius: "50%", background: "#e879a8", boxShadow: "0 0 0 2px #1a1a2e" }} />
+          )}
+        </Link>
         <Link
           href="/memories"
           aria-label="Browse memories"
@@ -107,6 +150,7 @@ export default function Chat() {
             />
           )}
         </Link>
+        </div>
       </div>
       {memoryNotice && (
         <div
