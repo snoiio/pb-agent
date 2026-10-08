@@ -313,6 +313,15 @@ export async function POST(req: Request) {
     },
 
     stopWhen: stepCountIs(5),
+
+    onFinish: ({ finishReason, text, steps, toolCalls }) => {
+      console.log("[PB diagnostic]", {
+        finishReason,
+        textLength: text.length,
+        steps: steps.length,
+        toolCalls: toolCalls.length,
+      });
+    },
   });
 
   return result.toUIMessageStreamResponse();
