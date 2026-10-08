@@ -12,7 +12,7 @@ const openrouter = createOpenRouter({
 // facts survive redeploys. Schema for the future:
 //   facts(id, fact TEXT, created_at)
 // ---------------------------------------------------------------
-const facts: string[] = [];
+const sql = neon(process.env.DATABASE_URL!);
 
 const pbPersona = `You are a digital incarnation of Princess Bubblegum.
 
