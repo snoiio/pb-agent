@@ -9,13 +9,20 @@ function extractTextContent(content: unknown): string | null {
     .map((part) => {
       if (!part || typeof part !== "object") return "";
       const value = part as { type?: unknown; text?: unknown };
-      return value.type === "text" && typeof value.text === "string" ? value.text : "";
+      return typeof value.text === "string" ? value.text : "";
     })
     .filter(Boolean)
     .join("\n")
     .trim();
 
   return text || null;
+}
+
+function describeValue(value: unknown) {
+  if (value === null) return { type: "null", length: 0 };
+  if (typeof value === "string") return { type: "string", length: value.length };
+  if (Array.isArray(value)) return { type: "array", length: value.length };
+  return { type: typeof value };
 }
 
 export async function POST(req: Request) {
@@ -85,12 +92,32 @@ export async function POST(req: Request) {
     }
 
     const payload = (await response.json()) as {
-      choices?: Array<{ message?: { content?: unknown } }>;
+      choices?: Array<{
+        finish_reason?: unknown;
+        message?: {
+          content?: unknown;
+          refusal?: unknown;
+          reasoning?: unknown;
+          [key: string]: unknown;
+        };
+      }>;
     };
-    const description = extractTextContent(payload.choices?.[0]?.message?.content);
+
+    const choice = payload.choices?.[0];
+    const message = choice?.message;
+    const description = extractTextContent(message?.content);
 
     if (!description) {
-      return Response.json({ ok: false, error: "The vision model returned no description." }, { status: 502 });
+      console.warn("[PB vision] empty description", {
+        model: VISION_MODEL,
+        hasChoice: Boolean(choice),
+        finishReason: choice?.finish_reason ?? null,
+        messageKeys: message ? Object.keys(message) : [],
+        content: describeValue(message?.content),
+        refusal: describeValue(message?.refusal),
+        reasoning: describeValue(message?.reasoning),
+      });
+      return Response.json({ ok: false, error: "The vision model returned no description." });
     }
 
     console.log("[PB vision] inspection complete", {
