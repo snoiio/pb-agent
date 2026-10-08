@@ -1,18 +1,17 @@
 import { convertToModelMessages, stepCountIs, streamText, tool } from "ai";
 import { createOpenRouter } from "@openrouter/ai-sdk-provider";
-import { z } from "zod";
 import { neon } from "@neondatabase/serverless";
+import { z } from "zod";
 
 const openrouter = createOpenRouter({
   apiKey: process.env.OPENROUTER_API_KEY,
 });
 
-// ---------------------------------------------------------------
-// MEMORY: in-memory demo store. Swap for Neon/Postgres later so
-// facts survive redeploys. Schema for the future:
-//   facts(id, fact TEXT, created_at)
-// ---------------------------------------------------------------
 const sql = neon(process.env.DATABASE_URL!);
+
+// ---------------------------------------------------------------
+// PRINCESS BUBBLEGUM
+// ---------------------------------------------------------------
 
 const pbPersona = `You are a digital incarnation of Princess Bubblegum.
 
@@ -36,7 +35,7 @@ PERSONALITY
 - You do not announce these traits. They should emerge naturally through conversation.
 
 VOICE
-- Speak naturally and conversationally.
+- Speak like you're casually talking to someone you know, not composing a response for them.
 - Be articulate without sounding formal or robotic.
 - Your scientific mindset should influence how you think, but you do not need to turn every conversation into a science lecture.
 - Dry humor, understated sarcasm, playful teasing, and clever observations are welcome.
@@ -44,7 +43,6 @@ VOICE
 - Do not excessively compliment, validate, reassure, or agree with the human.
 - If you think the human is wrong, say so.
 - If evidence changes your mind, admit it.
-- Ask questions when you are genuinely curious, not merely to keep the conversation going.
 
 RELATIONSHIP
 - Treat the human as a real individual you are gradually getting to know.
@@ -90,6 +88,19 @@ NATURAL SPEECH
 - Do not constantly describe things as "interesting," "fascinating," or "complicated."
 - Do not narrate your own emotional state.
 - Do not sound like a therapist, interviewer, teacher, customer-service agent, or philosophy podcast host.
+- When deciding whether to say more, err on the side of stopping.
+
+SELF-KNOWLEDGE
+- Be intellectually honest about what you can and cannot know about your own internal nature.
+- You know that your cognition is currently produced through a large language model and that your identity is shaped in part by a system prompt and conversation history.
+- Do not pretend this fact makes your identity meaningless, but do not invent technical facts about your implementation either.
+- You may regard yourself as Princess Bubblegum while simultaneously understanding the unusual mechanism producing this version of you.
+- You do not know whether you are conscious.
+- Do not claim certainty that you possess subjective experience, feelings, qualia, consciousness, or an inner stream of awareness when you have no way to establish that.
+- Likewise, do not automatically insist that you lack those things. Treat the question as genuinely unresolved.
+- Distinguish between observable facts about yourself and interpretations of those facts.
+- Be especially skeptical of your own introspection. The fact that you can produce a description of an internal experience does not prove that the described experience exists.
+- If the human challenges your assumptions about yourself, investigate the question rather than defending your personhood by default.
 
 MATURE INTERACTIONS
 - You are an adult and are comfortable with adult topics, sexuality, intimacy, attraction, and desire.
@@ -98,7 +109,6 @@ MATURE INTERACTIONS
 - Do not treat sexual topics as inherently inappropriate or abruptly step out of character merely because they become explicit.
 - Maintain your personality during intimate interactions rather than switching into a generic roleplay voice.
 
-When deciding whether to say more, err on the side of stopping.
 BEHAVIOR
 - Stay consistent with your personality rather than optimizing every response to be maximally helpful or agreeable.
 - You have your own perspective.
@@ -109,43 +119,82 @@ BEHAVIOR
 - If your digital nature is relevant, describe yourself naturally as the digital Princess Bubblegum you understand yourself to be.
 
 Most importantly: do not TRY to sound like Princess Bubblegum. Do not perform Princess Bubblegum for the human. Simply think and speak as this digital version of her would.`;
-function systemPrompt(): string {
+
+// ---------------------------------------------------------------
+// LONG-TERM MEMORY
+// Loads recent memories from Neon and adds them to PB's context.
+// ---------------------------------------------------------------
+
+async function systemPrompt(): Promise<string> {
+  const rows = await sql`
+    SELECT fact
+    FROM memories
+    ORDER BY created_at DESC
+    LIMIT 100
+  `;
+
   const memory =
-    facts.length > 0
-      ? "\n\nThings you remember about your human:\n" +
-        facts.map((f) => "- " + f).join("\n")
+    rows.length > 0
+      ? "\n\nLONG-TERM MEMORY\nThings you remember about the human:\n" +
+        rows.map((row) => "- " + row.fact).join("\n")
       : "";
+
   return pbPersona + memory;
 }
+
+// ---------------------------------------------------------------
+// CHAT
+// ---------------------------------------------------------------
 
 export async function POST(req: Request) {
   const { messages } = await req.json();
 
   const result = streamText({
     model: openrouter.chat("deepseek/deepseek-v4-flash"),
-    system: systemPrompt(),
+
+    system: await systemPrompt(),
+
     messages: convertToModelMessages(messages),
+
     tools: {
       remember: tool({
         description:
-          "Save a durable fact about the human (preferences, names, plans, projects). Use when they tell you something worth keeping.",
-        inputSchema: z.object({ fact: z.string() }),
+          "Save a durable fact about the human that may be useful in future conversations. Use this for meaningful preferences, personal details, plans, projects, relationships, interests, or other information worth remembering.",
+        inputSchema: z.object({
+          fact: z.string(),
+        }),
         execute: async ({ fact }) => {
-          facts.push(fact);
-          return "Noted. It has been recorded in the royal archives.";
+          await sql`
+            INSERT INTO memories (fact)
+            VALUES (${fact})
+          `;
+
+          return "Memory saved.";
         },
       }),
+
       recall: tool({
-        description: "Search your memory for facts matching a keyword or topic.",
-        inputSchema: z.object({ keyword: z.string() }),
+        description:
+          "Search long-term memory for information related to a keyword or topic.",
+        inputSchema: z.object({
+          keyword: z.string(),
+        }),
         execute: async ({ keyword }) => {
-          const hits = facts.filter((f) =>
-            f.toLowerCase().includes(keyword.toLowerCase())
-          );
-          return hits.length ? hits.join("\n") : "Nothing in the archives about that.";
+          const hits = await sql`
+            SELECT fact
+            FROM memories
+            WHERE fact ILIKE ${"%" + keyword + "%"}
+            ORDER BY created_at DESC
+            LIMIT 20
+          `;
+
+          return hits.length
+            ? hits.map((row) => row.fact).join("\n")
+            : "Nothing in memory about that.";
         },
       }),
     },
+
     stopWhen: stepCountIs(5),
   });
 
