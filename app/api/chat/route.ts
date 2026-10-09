@@ -442,7 +442,7 @@ export async function POST(req: Request) {
         }),
       }),
       inspectImage: tool({
-        description: "Inspect the most recently generated image when you actually want to see what NovelAI produced. The browser will send a temporary inspection copy to a vision model and return its visual observations. Use an optional focus only when you care about a particular detail.",
+        description: "Inspect the current image when you actually want to see its visual contents. The current image may be freshly generated or loaded from your archive. The browser sends a temporary inspection copy to a vision model and returns visual observations. Use an optional focus only when you care about a particular detail.",
         inputSchema: z.object({
           focus: z.string().max(500).optional(),
         }),
@@ -454,6 +454,38 @@ export async function POST(req: Request) {
           title: z.string().max(120).optional(),
           tags: z.array(z.string().min(1).max(40)).max(12).optional(),
           notes: z.string().max(500).optional(),
+        }),
+      }),
+      searchImages: tool({
+        description: "Search your permanent image archive by text, category, tags, or whether the image depicts you. Results are compact metadata only; use getImage with an archive ID when you want to load one.",
+        inputSchema: z.object({
+          query: z.string().max(200).optional(),
+          category: z.enum(["personal", "scientific", "reference", "art", "other"]).optional(),
+          tags: z.array(z.string().min(1).max(40)).max(12).optional(),
+          selfPortrait: z.boolean().optional(),
+          limit: z.number().int().min(1).max(10).optional(),
+        }),
+      }),
+      getImage: tool({
+        description: "Load one archived image by its exact archive ID into the browser as the current image. Loading it does not visually inspect it; after it loads, use inspectImage if you want to examine the pixels.",
+        inputSchema: z.object({
+          id: z.string().uuid(),
+        }),
+      }),
+      updateImage: tool({
+        description: "Update the filing metadata for one archived image. Supply its exact archive ID and only the fields you want to change.",
+        inputSchema: z.object({
+          id: z.string().uuid(),
+          title: z.string().max(120).optional(),
+          category: z.enum(["personal", "scientific", "reference", "art", "other"]).optional(),
+          tags: z.array(z.string().min(1).max(40)).max(12).optional(),
+          notes: z.string().max(500).optional(),
+        }),
+      }),
+      deleteImage: tool({
+        description: "Permanently delete one archived image and its archive metadata. Use the exact archive ID and only when you genuinely intend to remove it.",
+        inputSchema: z.object({
+          id: z.string().uuid(),
         }),
       }),
       remember: tool({
