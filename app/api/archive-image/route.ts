@@ -1,4 +1,5 @@
 import { neon } from "@neondatabase/serverless";
+import { del } from "@vercel/blob";
 import { handleUpload, type HandleUploadBody } from "@vercel/blob/client";
 
 const sql = neon(process.env.DATABASE_URL!);
@@ -79,6 +80,7 @@ export async function POST(request: Request) {
 
       const archived = rows[0];
       if (!archived) {
+        await del(blobPath).catch(() => undefined);
         return Response.json({ ok: false, error: "That archive ID already exists." }, { status: 409 });
       }
 
@@ -98,10 +100,16 @@ export async function POST(request: Request) {
         createdAt: archived.created_at,
       });
     } catch (error) {
+      await del(blobPath).catch((cleanupError) => {
+        console.error("[PB archive] orphan cleanup failed", {
+          blobPath,
+          message: cleanupError instanceof Error ? cleanupError.message : "Unknown error",
+        });
+      });
       console.error("[PB archive] finalize failed", {
         message: error instanceof Error ? error.message : "Unknown error",
       });
-      return Response.json({ ok: false, error: "The image uploaded, but its archive record could not be saved." }, { status: 500 });
+      return Response.json({ ok: false, error: "The archive record could not be saved, so the uploaded image was discarded." }, { status: 500 });
     }
   }
 
