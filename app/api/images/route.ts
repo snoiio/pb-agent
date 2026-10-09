@@ -1,5 +1,5 @@
 import { neon } from "@neondatabase/serverless";
-import { del, issueSignedToken, presignUrl } from "@vercel/blob";
+import { del, get } from "@vercel/blob";
 
 const sql = neon(process.env.DATABASE_URL!);
 const categories = new Set(["personal", "scientific", "reference", "art", "other"]);
@@ -34,6 +34,44 @@ function compactImage(row: any) {
     byteSize: row.byte_size,
     createdAt: row.created_at,
   };
+}
+
+export async function GET(request: Request) {
+  const id = new URL(request.url).searchParams.get("id")?.trim() ?? "";
+  if (!validArchiveId(id)) {
+    return Response.json({ ok: false, error: "A valid archive ID is required." }, { status: 400 });
+  }
+
+  try {
+    const rows = await sql`
+      SELECT blob_path, content_type
+      FROM images
+      WHERE id = ${id}
+      LIMIT 1
+    `;
+    const image = rows[0];
+    if (!image) {
+      return Response.json({ ok: false, error: `No archived image with ID ${id} exists.` }, { status: 404 });
+    }
+
+    const result = await get(image.blob_path, { access: "private" });
+    if (!result) {
+      return Response.json({ ok: false, error: "The archived image file is missing from Blob storage." }, { status: 404 });
+    }
+
+    return new Response(result.stream, {
+      headers: {
+        "Content-Type": result.blob.contentType || image.content_type || "application/octet-stream",
+        "Cache-Control": "private, no-store",
+      },
+    });
+  } catch (error) {
+    console.error("[PB images] stream failed", {
+      id,
+      message: error instanceof Error ? error.message : "Unknown error",
+    });
+    return Response.json({ ok: false, error: "The archived image file could not be streamed." }, { status: 500 });
+  }
 }
 
 export async function POST(request: Request) {
@@ -86,7 +124,7 @@ export async function POST(request: Request) {
 
     try {
       const rows = await sql`
-        SELECT id, blob_path, title, prompt, self_portrait, category, tags, notes,
+        SELECT id, title, prompt, self_portrait, category, tags, notes,
                width, height, model, content_type, byte_size, created_at
         FROM images
         WHERE id = ${id}
@@ -95,15 +133,11 @@ export async function POST(request: Request) {
       const image = rows[0];
       if (!image) return Response.json({ ok: false, error: `No archived image with ID ${id} exists.` }, { status: 404 });
 
-      const validUntil = Date.now() + 5 * 60 * 1000;
-      const token = await issueSignedToken({ pathname: image.blob_path, operations: ["get"], validUntil });
-      const { presignedUrl } = await presignUrl(token, {
-        pathname: image.blob_path,
-        operation: "get",
-        validUntil,
+      return Response.json({
+        ok: true,
+        image: compactImage(image),
+        presignedUrl: `/api/images?id=${encodeURIComponent(id)}`,
       });
-
-      return Response.json({ ok: true, image: compactImage(image), presignedUrl });
     } catch (error) {
       console.error("[PB images] get failed", { id, message: error instanceof Error ? error.message : "Unknown error" });
       return Response.json({ ok: false, error: "The archived image could not be loaded." }, { status: 500 });
