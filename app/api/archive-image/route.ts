@@ -1,10 +1,11 @@
 import { neon } from "@neondatabase/serverless";
-import { del } from "@vercel/blob";
-import { handleUpload, type HandleUploadBody } from "@vercel/blob/client";
+import { del, issueSignedToken, presignUrl } from "@vercel/blob";
 
 const sql = neon(process.env.DATABASE_URL!);
 
 const categories = new Set(["personal", "scientific", "reference", "art", "other"]);
+const allowedContentTypes = new Set(["image/png", "image/jpeg", "image/webp"]);
+const allowedExtensions = new Set(["png", "jpg", "jpeg", "webp"]);
 
 async function ensureImageArchiveTable() {
   await sql`
@@ -32,6 +33,43 @@ async function ensureImageArchiveTable() {
 export async function POST(request: Request) {
   const body = await request.json();
 
+  if (body?.action === "prepare") {
+    const archiveId = typeof body.archiveId === "string" ? body.archiveId.trim() : "";
+    const extension = typeof body.extension === "string" ? body.extension.trim().toLowerCase() : "";
+    const contentType = typeof body.contentType === "string" ? body.contentType.trim().toLowerCase() : "";
+
+    if (!archiveId || !/^[0-9a-f-]{36}$/i.test(archiveId)) {
+      return Response.json({ ok: false, error: "A valid archive ID is required." }, { status: 400 });
+    }
+    if (!allowedExtensions.has(extension) || !allowedContentTypes.has(contentType)) {
+      return Response.json({ ok: false, error: "Unsupported archive image type." }, { status: 400 });
+    }
+
+    const blobPath = `pb-archive/${archiveId}.${extension}`;
+
+    try {
+      const validUntil = Date.now() + 15 * 60 * 1000;
+      const token = await issueSignedToken({
+        pathname: blobPath,
+        operations: ["put"],
+        validUntil,
+      });
+      const { presignedUrl } = await presignUrl(token, {
+        pathname: blobPath,
+        operation: "put",
+        validUntil,
+      });
+
+      console.log("[PB archive] signed upload prepared", { archiveId, blobPath });
+      return Response.json({ ok: true, archiveId, blobPath, presignedUrl });
+    } catch (error) {
+      console.error("[PB archive] signed upload preparation failed", {
+        message: error instanceof Error ? error.message : "Unknown error",
+      });
+      return Response.json({ ok: false, error: "Could not prepare the private archive upload." }, { status: 500 });
+    }
+  }
+
   if (body?.action === "finalize") {
     const archiveId = typeof body.archiveId === "string" ? body.archiveId.trim() : "";
     const blobPath = typeof body.blobPath === "string" ? body.blobPath.trim() : "";
@@ -53,7 +91,7 @@ export async function POST(request: Request) {
     if (!archiveId || !/^[0-9a-f-]{36}$/i.test(archiveId)) {
       return Response.json({ ok: false, error: "A valid archive ID is required." }, { status: 400 });
     }
-    if (!blobPath.startsWith("pb-archive/")) {
+    if (!blobPath.startsWith(`pb-archive/${archiveId}.`)) {
       return Response.json({ ok: false, error: "A valid archive Blob path is required." }, { status: 400 });
     }
     if (!prompt) {
@@ -113,33 +151,5 @@ export async function POST(request: Request) {
     }
   }
 
-  try {
-    const jsonResponse = await handleUpload({
-      body: body as HandleUploadBody,
-      request,
-      onBeforeGenerateToken: async (pathname) => {
-        if (!pathname.startsWith("pb-archive/")) {
-          throw new Error("Invalid archive pathname.");
-        }
-
-        return {
-          allowedContentTypes: ["image/png", "image/jpeg", "image/webp"],
-          addRandomSuffix: true,
-        };
-      },
-      onUploadCompleted: async ({ blob }) => {
-        console.log("[PB archive] blob upload completed", {
-          pathname: blob.pathname,
-          contentType: blob.contentType,
-        });
-      },
-    });
-
-    return Response.json(jsonResponse);
-  } catch (error) {
-    console.error("[PB archive] upload token error", {
-      message: error instanceof Error ? error.message : "Unknown error",
-    });
-    return Response.json({ error: error instanceof Error ? error.message : "Archive upload failed." }, { status: 400 });
-  }
+  return Response.json({ ok: false, error: "Unknown archive action." }, { status: 400 });
 }
