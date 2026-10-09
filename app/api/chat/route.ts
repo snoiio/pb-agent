@@ -447,6 +447,15 @@ export async function POST(req: Request) {
           focus: z.string().max(500).optional(),
         }),
       }),
+      archiveImage: tool({
+        description: "Permanently archive the most recently generated image only when you decide it is worth keeping. Generated images are temporary by default, so do not archive every image automatically. You may inspect the image first. Choose a filing category and optional title, tags, or notes that will make the image useful to find later.",
+        inputSchema: z.object({
+          category: z.enum(["personal", "scientific", "reference", "art", "other"]),
+          title: z.string().max(120).optional(),
+          tags: z.array(z.string().min(1).max(40)).max(12).optional(),
+          notes: z.string().max(500).optional(),
+        }),
+      }),
       remember: tool({
         description:
           "Create a new long-term memory for meaningful information worth keeping across conversations. Avoid duplicates; update an existing memory instead when information changes.",
