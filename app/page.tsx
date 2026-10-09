@@ -62,13 +62,13 @@ type ArchivedImage = {
   createdAt: string;
 };
 
-// Keep generated images in the visible chat, but never resend their base64 bytes.
+// Keep generated and explicitly shown images visible in chat, but never resend their browser-local image URLs.
 function sanitizeOutgoingMessages(messages: Parameters<NonNullable<ConstructorParameters<typeof DefaultChatTransport>[0]>["prepareSendMessagesRequest"]>[0]["messages"]) {
   return messages.map((message) => ({
     ...message,
     parts: message.parts.map((part) => {
       if (
-        part.type !== "tool-generateImage" ||
+        !["tool-generateImage", "tool-showImage"].includes(part.type) ||
         !("output" in part) ||
         !part.output ||
         typeof part.output !== "object" ||
@@ -78,7 +78,13 @@ function sanitizeOutgoingMessages(messages: Parameters<NonNullable<ConstructorPa
       }
 
       const { imageUrl: _imageUrl, ...safeOutput } = part.output;
-      return { ...part, output: { ...safeOutput, imageGenerated: true } };
+      return {
+        ...part,
+        output: {
+          ...safeOutput,
+          ...(part.type === "tool-showImage" ? { imageShown: true } : { imageGenerated: true }),
+        },
+      };
     }),
   }));
 }
@@ -152,6 +158,7 @@ const toolIcons: Record<string, string> = {
   forget: "🗑️",
   generateImage: "🎨",
   inspectImage: "👁️",
+  showImage: "🖼️",
   archiveImage: "📁",
   searchImages: "🗂️",
   getImage: "🖼️",
@@ -178,7 +185,7 @@ export default function Chat() {
   const latestImageRef = useRef<string | null>(null);
   const latestImageInfoRef = useRef<GeneratedImageInfo | null>(null);
   const lastGeneratedImageUrlRef = useRef<string | null>(null);
-  const retrievedImageObjectUrlRef = useRef<string | null>(null);
+  const retrievedImageObjectUrlsRef = useRef(new Set<string>());
 
   const seenMemoryToolCalls = useRef(new Set<string>());
   const seenToolCalls = useRef(new Set<string>());
@@ -260,6 +267,30 @@ export default function Chat() {
             output: `Image inspection failed before an HTTP response: ${errorName}: ${errorMessage}`,
           });
         }
+        return;
+      }
+
+      if (toolCall.toolName === "showImage") {
+        const imageInfo = latestGeneratedImage(messages) ?? latestImageInfoRef.current;
+        const imageUrl = latestImageRef.current ?? imageInfo?.imageUrl;
+        if (!imageUrl) {
+          addToolOutput({
+            tool: "showImage",
+            toolCallId: toolCall.toolCallId,
+            output: { ok: false, message: "There is no current image available to show in this browser session." },
+          });
+          return;
+        }
+
+        addToolOutput({
+          tool: "showImage",
+          toolCallId: toolCall.toolCallId,
+          output: {
+            ok: true,
+            imageUrl,
+            message: "Displayed the current image to the human.",
+          },
+        });
         return;
       }
 
@@ -407,11 +438,10 @@ export default function Chat() {
               const imageResponse = await fetch(payload.presignedUrl);
               if (!imageResponse.ok) throw new Error(`Archived Blob download failed with HTTP ${imageResponse.status}.`);
               const imageBlob = await imageResponse.blob();
-              if (retrievedImageObjectUrlRef.current) URL.revokeObjectURL(retrievedImageObjectUrlRef.current);
               const objectUrl = URL.createObjectURL(imageBlob);
-              retrievedImageObjectUrlRef.current = objectUrl;
+              retrievedImageObjectUrlsRef.current.add(objectUrl);
               latestImageRef.current = objectUrl;
-              output = `Loaded archived image as the current image: ${describeArchivedImage(payload.image)}. It has not been visually inspected; use inspectImage if you want to examine it.`;
+              output = `Loaded archived image as the current image: ${describeArchivedImage(payload.image)}. It has not been visually inspected or shown; use inspectImage if you want to examine it or showImage if you want the human to see it.`;
             }
           } else if (toolCall.toolName === "updateImage") {
             output = payload.image
@@ -457,16 +487,15 @@ export default function Chat() {
     if (!imageInfo || imageInfo.imageUrl === lastGeneratedImageUrlRef.current) return;
 
     lastGeneratedImageUrlRef.current = imageInfo.imageUrl;
-    if (retrievedImageObjectUrlRef.current) {
-      URL.revokeObjectURL(retrievedImageObjectUrlRef.current);
-      retrievedImageObjectUrlRef.current = null;
-    }
     latestImageRef.current = imageInfo.imageUrl;
     latestImageInfoRef.current = imageInfo;
   }, [messages]);
 
   useEffect(() => () => {
-    if (retrievedImageObjectUrlRef.current) URL.revokeObjectURL(retrievedImageObjectUrlRef.current);
+    for (const objectUrl of retrievedImageObjectUrlsRef.current) {
+      URL.revokeObjectURL(objectUrl);
+    }
+    retrievedImageObjectUrlsRef.current.clear();
   }, []);
 
   async function loadMemories(search = "") {
@@ -608,6 +637,7 @@ export default function Chat() {
           const toolInput = toolPart.input as { keyword?: string } | undefined;
           const outputText = typeof toolPart.output === "string" ? toolPart.output : "";
           const imageResult = name === "generateImage" ? toolPart.output as { ok?: boolean; error?: string } : null;
+          const showResult = name === "showImage" ? toolPart.output as { ok?: boolean; message?: string } : null;
           const isComplete = toolPart.state === "output-available";
           const isError = toolPart.state === "output-error" || Boolean(toolPart.errorText);
           let summary = isComplete ? "Tool completed" : `Tool state: ${toolPart.state ?? "unknown"}`;
@@ -624,6 +654,9 @@ export default function Chat() {
             } else if (name === "inspectImage") {
               success = !outputText.startsWith("Image inspection failed") && !outputText.startsWith("There is no current image");
               summary = success ? "Inspected the current image" : outputText;
+            } else if (name === "showImage") {
+              success = showResult?.ok === true;
+              summary = success ? "Showed the current image in chat" : (showResult?.message ?? "Current image display failed");
             } else if (name === "archiveImage") {
               success = outputText.startsWith("Image archived:");
               summary = success ? outputText : (outputText || "Image archive failed");
@@ -834,6 +867,13 @@ export default function Chat() {
                   return <img key={i} src={result.imageUrl} alt={result.prompt ?? "Generated illustration"} width={256} height={256} style={{ display: "block", maxWidth: "100%", height: "auto", borderRadius: 10, marginTop: 8 }} />;
                 }
                 if (p.state === "output-available" && !result?.ok) return <span key={i} style={{ opacity: 0.7 }}>Image generation failed.</span>;
+              }
+              if (p.type === "tool-showImage") {
+                const result = p.output as { ok?: boolean; imageUrl?: string; message?: string } | undefined;
+                if (p.state === "output-available" && result?.ok && (result.imageUrl?.startsWith("blob:") || result.imageUrl?.startsWith("data:image/"))) {
+                  return <img key={i} src={result.imageUrl} alt="Image shown by Princess Bubblegum" width={256} height={256} style={{ display: "block", maxWidth: "100%", height: "auto", borderRadius: 10, marginTop: 8 }} />;
+                }
+                if (p.state === "output-available" && result?.ok === false) return <span key={i} style={{ opacity: 0.7 }}>{result.message ?? "Image display failed."}</span>;
               }
               return null;
             })}
