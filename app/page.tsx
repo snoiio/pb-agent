@@ -253,12 +253,37 @@ export default function Chat() {
           const imageBlob = await imageResponse.blob();
           const archiveId = crypto.randomUUID();
           const extension = imageBlob.type === "image/jpeg" ? "jpg" : imageBlob.type === "image/webp" ? "webp" : "png";
-          const { upload } = await import("@vercel/blob/client");
-          const uploaded = await upload(`pb-archive/${archiveId}.${extension}`, imageBlob, {
-            access: "private",
-            handleUploadUrl: "/api/archive-image",
-            contentType: imageBlob.type || "image/png",
+          const contentType = imageBlob.type || "image/png";
+
+          const prepareResponse = await fetch("/api/archive-image", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              action: "prepare",
+              archiveId,
+              extension,
+              contentType,
+              byteSize: imageBlob.size,
+            }),
           });
+          const prepared = await prepareResponse.json() as {
+            ok?: boolean;
+            blobPath?: string;
+            presignedUrl?: string;
+            error?: string;
+          };
+          if (!prepareResponse.ok || !prepared.ok || !prepared.blobPath || !prepared.presignedUrl) {
+            throw new Error(prepared.error ?? `Could not prepare archive upload (HTTP ${prepareResponse.status}).`);
+          }
+
+          const uploadResponse = await fetch(prepared.presignedUrl, {
+            method: "PUT",
+            headers: { "Content-Type": contentType },
+            body: imageBlob,
+          });
+          if (!uploadResponse.ok) {
+            throw new Error(`Blob upload failed with HTTP ${uploadResponse.status}.`);
+          }
 
           const archiveInput = toolCall.input as {
             category?: string;
@@ -272,7 +297,7 @@ export default function Chat() {
             body: JSON.stringify({
               action: "finalize",
               archiveId,
-              blobPath: uploaded.pathname,
+              blobPath: prepared.blobPath,
               title: archiveInput.title,
               category: archiveInput.category,
               tags: archiveInput.tags,
@@ -283,7 +308,7 @@ export default function Chat() {
               width: imageInfo.width,
               height: imageInfo.height,
               model: imageInfo.model,
-              contentType: imageBlob.type || "image/png",
+              contentType,
               byteSize: imageBlob.size,
             }),
           });
