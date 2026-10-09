@@ -171,7 +171,6 @@ function formatTime(date: Date, timeZone: string): string {
 }
 
 async function systemPrompt(timeZone?: string): Promise<string> {
-  // Safe, idempotent schema upgrade for existing databases.
   await sql`
     ALTER TABLE memories
     ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -307,8 +306,6 @@ async function generateTemporaryImage(prompt: string) {
   }
 }
 
-// NovelAI is the active image backend. The OpenRouter implementation above
-// remains available for a future provider switch.
 async function generateNovelAIImage(prompt: string) {
   const token = process.env.NOVELAI_API_TOKEN;
   if (!token) return { ok: false, error: "NovelAI API token is not configured." };
@@ -358,9 +355,6 @@ async function generateNovelAIImage(prompt: string) {
       return { ok: false, error: `NovelAI returned HTTP ${response.status}${detail ? `: ${detail}` : ""}` };
     }
 
-    // NovelAI returns a ZIP archive containing image_0.png.
-    // Read its central directory rather than assuming the local header
-    // contains sizes (ZIP writers may use data descriptors).
     const zip = Buffer.from(await response.arrayBuffer());
     const { inflateRawSync } = await import("node:zlib");
     let end = -1;
@@ -529,12 +523,75 @@ export async function POST(req: Request) {
 
     stopWhen: stepCountIs(5),
 
-    onFinish: ({ finishReason, text, steps, toolCalls }) => {
+    onStepFinish: ({
+      stepType,
+      finishReason,
+      text,
+      reasoning,
+      toolCalls,
+      toolResults,
+      usage,
+      providerMetadata,
+      response,
+      warnings,
+    }) => {
+      console.log("[PB step diagnostic]", {
+        stepType,
+        finishReason,
+        textLength: text.length,
+        reasoningLength: reasoning?.length ?? 0,
+        toolCalls: toolCalls.map((call) => call.toolName),
+        toolResultCount: toolResults.length,
+        usage: {
+          promptTokens: usage.promptTokens,
+          completionTokens: usage.completionTokens,
+          totalTokens: usage.totalTokens,
+        },
+        response: response
+          ? {
+              id: response.id,
+              model: response.model,
+            }
+          : null,
+        providerMetadataKeys: providerMetadata ? Object.keys(providerMetadata) : [],
+        warningCount: warnings?.length ?? 0,
+      });
+    },
+
+    onFinish: ({ finishReason, text, reasoning, steps, toolCalls, usage, providerMetadata, response, warnings }) => {
       console.log("[PB diagnostic]", {
         finishReason,
         textLength: text.length,
-        steps: steps.length,
-        toolCalls: toolCalls.length,
+        reasoningLength: reasoning?.length ?? 0,
+        steps: steps.map((step) => ({
+          stepType: step.stepType,
+          finishReason: step.finishReason,
+          textLength: step.text.length,
+          reasoningLength: step.reasoning?.length ?? 0,
+          toolCalls: step.toolCalls.map((call) => call.toolName),
+          toolResultCount: step.toolResults.length,
+          usage: {
+            promptTokens: step.usage.promptTokens,
+            completionTokens: step.usage.completionTokens,
+            totalTokens: step.usage.totalTokens,
+          },
+          responseModel: step.response?.model ?? null,
+          providerMetadataKeys: step.providerMetadata ? Object.keys(step.providerMetadata) : [],
+        })),
+        toolCalls: toolCalls.map((call) => call.toolName),
+        usage: {
+          promptTokens: usage.promptTokens,
+          completionTokens: usage.completionTokens,
+          totalTokens: usage.totalTokens,
+        },
+        response: response
+          ? {
+              id: response.id,
+              model: response.model,
+            }
+          : null,
+        providerMetadataKeys: providerMetadata ? Object.keys(providerMetadata) : [],
+        warningCount: warnings?.length ?? 0,
       });
     },
   });
