@@ -177,6 +177,7 @@ export default function Chat() {
   const seenResponses = useRef(new Set<string>());
   const latestImageRef = useRef<string | null>(null);
   const latestImageInfoRef = useRef<GeneratedImageInfo | null>(null);
+  const lastGeneratedImageUrlRef = useRef<string | null>(null);
   const retrievedImageObjectUrlRef = useRef<string | null>(null);
 
   const seenMemoryToolCalls = useRef(new Set<string>());
@@ -215,7 +216,6 @@ export default function Chat() {
 
         try {
           latestImageRef.current = imageUrl;
-          if (imageInfo && !latestImageInfoRef.current) latestImageInfoRef.current = imageInfo;
           const inspectionImage = await prepareImageForInspection(imageUrl);
           const input = toolCall.input as { focus?: string };
           const requestBody = JSON.stringify({
@@ -450,14 +450,19 @@ export default function Chat() {
     setToolChanged(window.localStorage.getItem("pb-tool-changed") === "true");
   }, []);
 
-  // Track only the newest generated image in browser memory. The base64 image
-  // is still stripped from every normal outgoing chat request.
+  // Only move the current-image pointer when a genuinely new generation appears.
+  // Tool-result message updates must not replace an archived image that was just loaded.
   useEffect(() => {
     const imageInfo = latestGeneratedImage(messages);
-    if (imageInfo) {
-      latestImageRef.current = imageInfo.imageUrl;
-      latestImageInfoRef.current = imageInfo;
+    if (!imageInfo || imageInfo.imageUrl === lastGeneratedImageUrlRef.current) return;
+
+    lastGeneratedImageUrlRef.current = imageInfo.imageUrl;
+    if (retrievedImageObjectUrlRef.current) {
+      URL.revokeObjectURL(retrievedImageObjectUrlRef.current);
+      retrievedImageObjectUrlRef.current = null;
     }
+    latestImageRef.current = imageInfo.imageUrl;
+    latestImageInfoRef.current = imageInfo;
   }, [messages]);
 
   useEffect(() => () => {
