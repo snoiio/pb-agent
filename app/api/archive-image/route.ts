@@ -58,6 +58,7 @@ export async function POST(request: Request) {
         pathname: blobPath,
         operation: "put",
         validUntil,
+        addRandomSuffix: false,
       });
 
       console.log("[PB archive] signed upload prepared", { archiveId, blobPath });
