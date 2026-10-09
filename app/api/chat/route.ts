@@ -219,7 +219,7 @@ function sanitizeImageOutputs(messages: any[]) {
     parts: Array.isArray(message.parts)
       ? message.parts.map((part: any) => {
           if (
-            part?.type !== "tool-generateImage" ||
+            !["tool-generateImage", "tool-showImage"].includes(part?.type) ||
             !part.output ||
             typeof part.output !== "object" ||
             !("imageUrl" in part.output)
@@ -235,7 +235,7 @@ function sanitizeImageOutputs(messages: any[]) {
             ...part,
             output: {
               ...safeOutput,
-              imageGenerated: true,
+              ...(part.type === "tool-showImage" ? { imageShown: true } : { imageGenerated: true }),
             },
           };
         })
@@ -447,6 +447,10 @@ export async function POST(req: Request) {
           focus: z.string().max(500).optional(),
         }),
       }),
+      showImage: tool({
+        description: "Show the current image to the human in the chat when you choose to present it. This does not load or inspect an image; use getImage first for an archived image and inspectImage separately if you want to examine its contents. Use showImage only when you actually want the human to see the current image.",
+        inputSchema: z.object({}),
+      }),
       archiveImage: tool({
         description: "Permanently archive the most recently generated image only when you decide it is worth keeping. Generated images are temporary by default, so do not archive every image automatically. You may inspect the image first. Choose a filing category and optional title, tags, or notes that will make the image useful to find later.",
         inputSchema: z.object({
@@ -467,7 +471,7 @@ export async function POST(req: Request) {
         }),
       }),
       getImage: tool({
-        description: "Load one archived image by its exact archive ID into the browser as the current image. Loading it does not visually inspect it; after it loads, use inspectImage if you want to examine the pixels.",
+        description: "Load one archived image by its exact archive ID into the browser as the current image. Loading it does not visually inspect it or show it in chat; after it loads, use inspectImage if you want to examine the pixels or showImage if you want the human to see it.",
         inputSchema: z.object({
           id: z.string().uuid(),
         }),
