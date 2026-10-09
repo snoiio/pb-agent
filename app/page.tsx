@@ -36,6 +36,16 @@ type ResponseEvent = {
 
 type LogEvent = ToolEvent | ResponseEvent;
 
+type GeneratedImageInfo = {
+  imageUrl: string;
+  prompt: string;
+  effectivePrompt: string;
+  selfPortrait: boolean;
+  width: number;
+  height: number;
+  model: string;
+};
+
 // Keep generated images in the visible chat, but never resend their base64 bytes.
 function sanitizeOutgoingMessages(messages: Parameters<NonNullable<ConstructorParameters<typeof DefaultChatTransport>[0]>["prepareSendMessagesRequest"]>[0]["messages"]) {
   return messages.map((message) => ({
@@ -57,16 +67,29 @@ function sanitizeOutgoingMessages(messages: Parameters<NonNullable<ConstructorPa
   }));
 }
 
-function latestGeneratedImage(messages: Array<{ parts: Array<any> }>): string | null {
+function latestGeneratedImage(messages: Array<{ parts: Array<any> }>): GeneratedImageInfo | null {
   for (let messageIndex = messages.length - 1; messageIndex >= 0; messageIndex -= 1) {
     const parts = messages[messageIndex].parts;
     for (let partIndex = parts.length - 1; partIndex >= 0; partIndex -= 1) {
       const part = parts[partIndex];
       if (part?.type !== "tool-generateImage") continue;
-      const result = part.output as { ok?: boolean; imageUrl?: string } | undefined;
-      if (part.state === "output-available" && result?.ok && result.imageUrl?.startsWith("data:image/")) {
-        return result.imageUrl;
-      }
+      const result = part.output as { ok?: boolean; imageUrl?: string; prompt?: string } | undefined;
+      if (part.state !== "output-available" || !result?.ok || !result.imageUrl?.startsWith("data:image/")) continue;
+
+      const input = part.input as { prompt?: string; selfPortrait?: boolean } | undefined;
+      const prompt = result.prompt ?? input?.prompt ?? "";
+      const selfPortrait = input?.selfPortrait === true;
+      return {
+        imageUrl: result.imageUrl,
+        prompt,
+        effectivePrompt: selfPortrait
+          ? `fur dataset, Princess Bubblegum from Adventure Time, ${prompt.trim()} In the art style of Adventure Time.`
+          : prompt,
+        selfPortrait,
+        width: selfPortrait ? 512 : 832,
+        height: selfPortrait ? 768 : 1216,
+        model: "nai-diffusion-4-5-full",
+      };
     }
   }
   return null;
@@ -105,6 +128,7 @@ const toolIcons: Record<string, string> = {
   forget: "🗑️",
   generateImage: "🎨",
   inspectImage: "👁️",
+  archiveImage: "📁",
 };
 
 export default function Chat() {
@@ -124,6 +148,7 @@ export default function Chat() {
   const [toolEvents, setToolEvents] = useState<LogEvent[]>([]);
   const seenResponses = useRef(new Set<string>());
   const latestImageRef = useRef<string | null>(null);
+  const latestImageInfoRef = useRef<GeneratedImageInfo | null>(null);
 
   const seenMemoryToolCalls = useRef(new Set<string>());
   const seenToolCalls = useRef(new Set<string>());
@@ -145,63 +170,146 @@ export default function Chat() {
     }),
     sendAutomaticallyWhen: lastAssistantMessageIsCompleteWithToolCalls,
     async onToolCall({ toolCall }) {
-      if (toolCall.dynamic || toolCall.toolName !== "inspectImage") return;
+      if (toolCall.dynamic) return;
 
-      const imageUrl = latestGeneratedImage(messages) ?? latestImageRef.current;
-      if (!imageUrl) {
-        addToolOutput({
-          tool: "inspectImage",
-          toolCallId: toolCall.toolCallId,
-          output: "There is no generated image available to inspect in this browser session.",
-        });
+      if (toolCall.toolName === "inspectImage") {
+        const imageInfo = latestGeneratedImage(messages) ?? latestImageInfoRef.current;
+        const imageUrl = imageInfo?.imageUrl ?? latestImageRef.current;
+        if (!imageUrl) {
+          addToolOutput({
+            tool: "inspectImage",
+            toolCallId: toolCall.toolCallId,
+            output: "There is no generated image available to inspect in this browser session.",
+          });
+          return;
+        }
+
+        try {
+          latestImageRef.current = imageUrl;
+          if (imageInfo) latestImageInfoRef.current = imageInfo;
+          const inspectionImage = await prepareImageForInspection(imageUrl);
+          const input = toolCall.input as { focus?: string };
+          const requestBody = JSON.stringify({
+            imageUrl: inspectionImage,
+            focus: typeof input?.focus === "string" ? input.focus : undefined,
+          });
+          console.log("[PB vision client] request started", {
+            inspectionImageLength: inspectionImage.length,
+            requestBodyLength: requestBody.length,
+          });
+
+          const response = await fetch("/api/inspect-image", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: requestBody,
+          });
+          console.log("[PB vision client] response", {
+            status: response.status,
+            ok: response.ok,
+          });
+
+          const payload = await response.json() as { ok?: boolean; description?: string; error?: string };
+          const output = response.ok && payload.ok && payload.description
+            ? payload.description
+            : `Image inspection failed: ${payload.error ?? `HTTP ${response.status}`}`;
+
+          addToolOutput({
+            tool: "inspectImage",
+            toolCallId: toolCall.toolCallId,
+            output,
+          });
+        } catch (inspectionError) {
+          const errorName = inspectionError instanceof Error ? inspectionError.name : "UnknownError";
+          const errorMessage = inspectionError instanceof Error ? inspectionError.message : "Unknown error";
+          console.error("[PB vision client] request exception", {
+            name: errorName,
+            message: errorMessage,
+          });
+          addToolOutput({
+            tool: "inspectImage",
+            toolCallId: toolCall.toolCallId,
+            output: `Image inspection failed before an HTTP response: ${errorName}: ${errorMessage}`,
+          });
+        }
         return;
       }
 
-      try {
-        latestImageRef.current = imageUrl;
-        const inspectionImage = await prepareImageForInspection(imageUrl);
-        const input = toolCall.input as { focus?: string };
-        const requestBody = JSON.stringify({
-          imageUrl: inspectionImage,
-          focus: typeof input?.focus === "string" ? input.focus : undefined,
-        });
-        console.log("[PB vision client] request started", {
-          inspectionImageLength: inspectionImage.length,
-          requestBodyLength: requestBody.length,
-        });
+      if (toolCall.toolName === "archiveImage") {
+        const imageInfo = latestGeneratedImage(messages) ?? latestImageInfoRef.current;
+        if (!imageInfo) {
+          addToolOutput({
+            tool: "archiveImage",
+            toolCallId: toolCall.toolCallId,
+            output: "There is no generated image available to archive in this browser session.",
+          });
+          return;
+        }
 
-        const response = await fetch("/api/inspect-image", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: requestBody,
-        });
-        console.log("[PB vision client] response", {
-          status: response.status,
-          ok: response.ok,
-        });
+        try {
+          latestImageRef.current = imageInfo.imageUrl;
+          latestImageInfoRef.current = imageInfo;
+          const imageResponse = await fetch(imageInfo.imageUrl);
+          if (!imageResponse.ok) throw new Error("The latest generated image could not be read from the browser.");
+          const imageBlob = await imageResponse.blob();
+          const archiveId = crypto.randomUUID();
+          const extension = imageBlob.type === "image/jpeg" ? "jpg" : imageBlob.type === "image/webp" ? "webp" : "png";
+          const { upload } = await import("@vercel/blob/client");
+          const uploaded = await upload(`pb-archive/${archiveId}.${extension}`, imageBlob, {
+            access: "private",
+            handleUploadUrl: "/api/archive-image",
+            contentType: imageBlob.type || "image/png",
+          });
 
-        const payload = await response.json() as { ok?: boolean; description?: string; error?: string };
-        const output = response.ok && payload.ok && payload.description
-          ? payload.description
-          : `Image inspection failed: ${payload.error ?? `HTTP ${response.status}`}`;
+          const archiveInput = toolCall.input as {
+            category?: string;
+            title?: string;
+            tags?: string[];
+            notes?: string;
+          };
+          const finalizeResponse = await fetch("/api/archive-image", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              action: "finalize",
+              archiveId,
+              blobPath: uploaded.pathname,
+              title: archiveInput.title,
+              category: archiveInput.category,
+              tags: archiveInput.tags,
+              notes: archiveInput.notes,
+              prompt: imageInfo.prompt,
+              effectivePrompt: imageInfo.effectivePrompt,
+              selfPortrait: imageInfo.selfPortrait,
+              width: imageInfo.width,
+              height: imageInfo.height,
+              model: imageInfo.model,
+              contentType: imageBlob.type || "image/png",
+              byteSize: imageBlob.size,
+            }),
+          });
+          const payload = await finalizeResponse.json() as { ok?: boolean; archiveId?: string; category?: string; error?: string };
+          const output = finalizeResponse.ok && payload.ok && payload.archiveId
+            ? `Image archived: [${payload.archiveId}] category ${payload.category ?? archiveInput.category ?? "other"}.`
+            : `Image archive failed: ${payload.error ?? `HTTP ${finalizeResponse.status}`}`;
 
-        addToolOutput({
-          tool: "inspectImage",
-          toolCallId: toolCall.toolCallId,
-          output,
-        });
-      } catch (inspectionError) {
-        const errorName = inspectionError instanceof Error ? inspectionError.name : "UnknownError";
-        const errorMessage = inspectionError instanceof Error ? inspectionError.message : "Unknown error";
-        console.error("[PB vision client] request exception", {
-          name: errorName,
-          message: errorMessage,
-        });
-        addToolOutput({
-          tool: "inspectImage",
-          toolCallId: toolCall.toolCallId,
-          output: `Image inspection failed before an HTTP response: ${errorName}: ${errorMessage}`,
-        });
+          addToolOutput({
+            tool: "archiveImage",
+            toolCallId: toolCall.toolCallId,
+            output,
+          });
+        } catch (archiveError) {
+          const errorName = archiveError instanceof Error ? archiveError.name : "UnknownError";
+          const errorMessage = archiveError instanceof Error ? archiveError.message : "Unknown error";
+          console.error("[PB archive client] request exception", {
+            name: errorName,
+            message: errorMessage,
+          });
+          addToolOutput({
+            tool: "archiveImage",
+            toolCallId: toolCall.toolCallId,
+            output: `Image archive failed: ${errorName}: ${errorMessage}`,
+          });
+        }
       }
     },
   });
@@ -215,8 +323,11 @@ export default function Chat() {
   // Track only the newest generated image in browser memory. The base64 image
   // is still stripped from every normal outgoing chat request.
   useEffect(() => {
-    const imageUrl = latestGeneratedImage(messages);
-    if (imageUrl) latestImageRef.current = imageUrl;
+    const imageInfo = latestGeneratedImage(messages);
+    if (imageInfo) {
+      latestImageRef.current = imageInfo.imageUrl;
+      latestImageInfoRef.current = imageInfo;
+    }
   }, [messages]);
 
   async function loadMemories(search = "") {
@@ -374,6 +485,9 @@ export default function Chat() {
             } else if (name === "inspectImage") {
               success = !outputText.startsWith("Image inspection failed") && !outputText.startsWith("There is no generated image");
               summary = success ? "Inspected the latest generated image" : outputText;
+            } else if (name === "archiveImage") {
+              success = outputText.startsWith("Image archived:");
+              summary = success ? outputText : (outputText || "Image archive failed");
             }
             if (outputText.startsWith("No memory with ID")) success = false;
           } else if (toolPart.errorText) {
