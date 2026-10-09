@@ -306,21 +306,26 @@ async function generateTemporaryImage(prompt: string) {
   }
 }
 
-async function generateNovelAIImage(prompt: string) {
+async function generateNovelAIImage(prompt: string, selfPortrait = false) {
   const token = process.env.NOVELAI_API_TOKEN;
   if (!token) return { ok: false, error: "NovelAI API token is not configured." };
 
   const model = "nai-diffusion-4-5-full";
   const negativePrompt = "lowres, blurry, bad anatomy, bad hands, text, watermark";
-  const caption = { base_caption: prompt, char_captions: [] };
+  const effectivePrompt = selfPortrait
+    ? `fur dataset, Princess Bubblegum from Adventure Time, ${prompt.trim()} In the art style of Adventure Time.`
+    : prompt;
+  const width = selfPortrait ? 512 : 832;
+  const height = selfPortrait ? 768 : 1216;
+  const caption = { base_caption: effectivePrompt, char_captions: [] };
   const payload = {
-    input: prompt,
+    input: effectivePrompt,
     model,
     action: "generate",
     parameters: {
       params_version: 3,
-      width: 832,
-      height: 1216,
+      width,
+      height,
       steps: 28,
       n_samples: 1,
       sampler: "k_euler_ancestral",
@@ -338,7 +343,13 @@ async function generateNovelAIImage(prompt: string) {
   };
 
   try {
-    console.log("[PB image] NovelAI request", { model, promptLength: prompt.length });
+    console.log("[PB image] NovelAI request", {
+      model,
+      promptLength: effectivePrompt.length,
+      selfPortrait,
+      width,
+      height,
+    });
     const response = await fetch("https://image.novelai.net/ai/generate-image", {
       method: "POST",
       headers: {
@@ -385,7 +396,7 @@ async function generateNovelAIImage(prompt: string) {
       offset += 46 + filenameLength + extraLength + commentLength;
     }
     if (!image || image.length === 0) throw new Error("NovelAI returned no PNG image");
-    console.log("[PB image] NovelAI success", { imageBytes: image.length });
+    console.log("[PB image] NovelAI success", { imageBytes: image.length, selfPortrait, width, height });
     return {
       ok: true,
       prompt,
@@ -414,9 +425,12 @@ export async function POST(req: Request) {
 
     tools: {
       generateImage: tool({
-        description: "Generate one temporary illustration to display in chat. You choose its subject and art style, including how to depict yourself. Use only when requested or genuinely useful. You do not automatically see the generated result; use inspectImage if you want to examine the most recent image.",
-        inputSchema: z.object({ prompt: z.string().min(1).max(1800) }),
-        execute: async ({ prompt }) => generateNovelAIImage(prompt),
+        description: "Generate one temporary illustration to display in chat. You choose its subject and scene. Set selfPortrait to true whenever the image depicts you (Princess Bubblegum), including images where you appear with other subjects; the server will automatically apply your standardized Adventure Time self-image style and size. Leave selfPortrait false or omit it for images that do not depict you. Use only when requested or genuinely useful. You do not automatically see the generated result; use inspectImage if you want to examine the most recent image.",
+        inputSchema: z.object({
+          prompt: z.string().min(1).max(1800),
+          selfPortrait: z.boolean().optional(),
+        }),
+        execute: async ({ prompt, selfPortrait }) => generateNovelAIImage(prompt, selfPortrait === true),
         toModelOutput: (output) => ({
           type: "text" as const,
           value:
