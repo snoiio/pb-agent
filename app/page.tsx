@@ -46,6 +46,22 @@ type GeneratedImageInfo = {
   model: string;
 };
 
+type ArchivedImage = {
+  id: string;
+  title?: string | null;
+  prompt: string;
+  selfPortrait: boolean;
+  category: string;
+  tags: string[];
+  notes?: string | null;
+  width?: number | null;
+  height?: number | null;
+  model?: string | null;
+  contentType?: string | null;
+  byteSize?: number | null;
+  createdAt: string;
+};
+
 // Keep generated images in the visible chat, but never resend their base64 bytes.
 function sanitizeOutgoingMessages(messages: Parameters<NonNullable<ConstructorParameters<typeof DefaultChatTransport>[0]>["prepareSendMessagesRequest"]>[0]["messages"]) {
   return messages.map((message) => ({
@@ -116,9 +132,17 @@ async function prepareImageForInspection(dataUrl: string): Promise<string> {
       context.drawImage(image, 0, 0, width, height);
       resolve(canvas.toDataURL("image/jpeg", 0.72));
     };
-    image.onerror = () => reject(new Error("The latest image could not be prepared for inspection."));
+    image.onerror = () => reject(new Error("The current image could not be prepared for inspection."));
     image.src = dataUrl;
   });
+}
+
+function describeArchivedImage(image: ArchivedImage): string {
+  const title = image.title?.trim() || "Untitled";
+  const tags = image.tags?.length ? ` · tags: ${image.tags.join(", ")}` : "";
+  const self = image.selfPortrait ? " · self portrait" : "";
+  const prompt = image.prompt ? ` · prompt: ${image.prompt.slice(0, 220)}` : "";
+  return `[${image.id}] ${title} · ${image.category}${tags}${self} · ${new Date(image.createdAt).toLocaleString()}${prompt}`;
 }
 
 const toolIcons: Record<string, string> = {
@@ -129,6 +153,10 @@ const toolIcons: Record<string, string> = {
   generateImage: "🎨",
   inspectImage: "👁️",
   archiveImage: "📁",
+  searchImages: "🗂️",
+  getImage: "🖼️",
+  updateImage: "🏷️",
+  deleteImage: "🗑️",
 };
 
 export default function Chat() {
@@ -149,6 +177,7 @@ export default function Chat() {
   const seenResponses = useRef(new Set<string>());
   const latestImageRef = useRef<string | null>(null);
   const latestImageInfoRef = useRef<GeneratedImageInfo | null>(null);
+  const retrievedImageObjectUrlRef = useRef<string | null>(null);
 
   const seenMemoryToolCalls = useRef(new Set<string>());
   const seenToolCalls = useRef(new Set<string>());
@@ -174,19 +203,19 @@ export default function Chat() {
 
       if (toolCall.toolName === "inspectImage") {
         const imageInfo = latestGeneratedImage(messages) ?? latestImageInfoRef.current;
-        const imageUrl = imageInfo?.imageUrl ?? latestImageRef.current;
+        const imageUrl = latestImageRef.current ?? imageInfo?.imageUrl;
         if (!imageUrl) {
           addToolOutput({
             tool: "inspectImage",
             toolCallId: toolCall.toolCallId,
-            output: "There is no generated image available to inspect in this browser session.",
+            output: "There is no current image available to inspect in this browser session.",
           });
           return;
         }
 
         try {
           latestImageRef.current = imageUrl;
-          if (imageInfo) latestImageInfoRef.current = imageInfo;
+          if (imageInfo && !latestImageInfoRef.current) latestImageInfoRef.current = imageInfo;
           const inspectionImage = await prepareImageForInspection(imageUrl);
           const input = toolCall.input as { focus?: string };
           const requestBody = JSON.stringify({
@@ -335,6 +364,82 @@ export default function Chat() {
             output: `Image archive failed: ${errorName}: ${errorMessage}`,
           });
         }
+        return;
+      }
+
+      if (["searchImages", "getImage", "updateImage", "deleteImage"].includes(toolCall.toolName)) {
+        try {
+          const action = toolCall.toolName === "searchImages"
+            ? "search"
+            : toolCall.toolName === "getImage"
+              ? "get"
+              : toolCall.toolName === "updateImage"
+                ? "update"
+                : "delete";
+          const input = (toolCall.input ?? {}) as Record<string, unknown>;
+          const response = await fetch("/api/images", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ action, ...input }),
+          });
+          const payload = await response.json() as {
+            ok?: boolean;
+            error?: string;
+            images?: ArchivedImage[];
+            image?: ArchivedImage;
+            presignedUrl?: string;
+            id?: string;
+            title?: string | null;
+          };
+
+          let output: string;
+          if (!response.ok || !payload.ok) {
+            output = `Image archive ${action} failed: ${payload.error ?? `HTTP ${response.status}`}`;
+          } else if (toolCall.toolName === "searchImages") {
+            const images = payload.images ?? [];
+            output = images.length
+              ? `Image archive search:\n${images.map(describeArchivedImage).join("\n")}`
+              : "Image archive search: no matching images.";
+          } else if (toolCall.toolName === "getImage") {
+            if (!payload.image || !payload.presignedUrl) {
+              output = "Image archive get failed: the archive returned incomplete image data.";
+            } else {
+              const imageResponse = await fetch(payload.presignedUrl);
+              if (!imageResponse.ok) throw new Error(`Archived Blob download failed with HTTP ${imageResponse.status}.`);
+              const imageBlob = await imageResponse.blob();
+              if (retrievedImageObjectUrlRef.current) URL.revokeObjectURL(retrievedImageObjectUrlRef.current);
+              const objectUrl = URL.createObjectURL(imageBlob);
+              retrievedImageObjectUrlRef.current = objectUrl;
+              latestImageRef.current = objectUrl;
+              output = `Loaded archived image as the current image: ${describeArchivedImage(payload.image)}. It has not been visually inspected; use inspectImage if you want to examine it.`;
+            }
+          } else if (toolCall.toolName === "updateImage") {
+            output = payload.image
+              ? `Archived image updated: ${describeArchivedImage(payload.image)}`
+              : "Image archive update failed: no updated record was returned.";
+          } else {
+            output = `Archived image deleted: [${payload.id ?? String(input.id ?? "unknown")}]${payload.title ? ` ${payload.title}` : ""}.`;
+          }
+
+          addToolOutput({
+            tool: toolCall.toolName as "searchImages" | "getImage" | "updateImage" | "deleteImage",
+            toolCallId: toolCall.toolCallId,
+            output,
+          });
+        } catch (archiveAccessError) {
+          const errorName = archiveAccessError instanceof Error ? archiveAccessError.name : "UnknownError";
+          const errorMessage = archiveAccessError instanceof Error ? archiveAccessError.message : "Unknown error";
+          console.error("[PB archive access client] request exception", {
+            tool: toolCall.toolName,
+            name: errorName,
+            message: errorMessage,
+          });
+          addToolOutput({
+            tool: toolCall.toolName as "searchImages" | "getImage" | "updateImage" | "deleteImage",
+            toolCallId: toolCall.toolCallId,
+            output: `Image archive operation failed: ${errorName}: ${errorMessage}`,
+          });
+        }
       }
     },
   });
@@ -354,6 +459,10 @@ export default function Chat() {
       latestImageInfoRef.current = imageInfo;
     }
   }, [messages]);
+
+  useEffect(() => () => {
+    if (retrievedImageObjectUrlRef.current) URL.revokeObjectURL(retrievedImageObjectUrlRef.current);
+  }, []);
 
   async function loadMemories(search = "") {
     setMemoriesLoading(true);
@@ -508,11 +617,23 @@ export default function Chat() {
               success = imageResult?.ok === true;
               summary = success ? "Generated a temporary image" : (imageResult?.error ?? "Image generation failed");
             } else if (name === "inspectImage") {
-              success = !outputText.startsWith("Image inspection failed") && !outputText.startsWith("There is no generated image");
-              summary = success ? "Inspected the latest generated image" : outputText;
+              success = !outputText.startsWith("Image inspection failed") && !outputText.startsWith("There is no current image");
+              summary = success ? "Inspected the current image" : outputText;
             } else if (name === "archiveImage") {
               success = outputText.startsWith("Image archived:");
               summary = success ? outputText : (outputText || "Image archive failed");
+            } else if (name === "searchImages") {
+              success = outputText.startsWith("Image archive search:");
+              summary = success ? "Searched the image archive" : (outputText || "Image archive search failed");
+            } else if (name === "getImage") {
+              success = outputText.startsWith("Loaded archived image");
+              summary = success ? "Loaded an archived image" : (outputText || "Archived image load failed");
+            } else if (name === "updateImage") {
+              success = outputText.startsWith("Archived image updated:");
+              summary = success ? "Updated archived image metadata" : (outputText || "Archived image update failed");
+            } else if (name === "deleteImage") {
+              success = outputText.startsWith("Archived image deleted:");
+              summary = success ? outputText : (outputText || "Archived image deletion failed");
             }
             if (outputText.startsWith("No memory with ID")) success = false;
           } else if (toolPart.errorText) {
