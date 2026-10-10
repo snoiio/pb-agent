@@ -238,6 +238,10 @@ const toolIcons: Record<string, string> = {
 
 export default function Chat() {
   const [input, setInput] = useState("");
+  const chatScrollRef = useRef<HTMLDivElement>(null);
+  const followRef = useRef(true);
+  const forceBottomRef = useRef(true);
+  const [viewportHeight, setViewportHeight] = useState<number | null>(null);
   const [memoryNotice, setMemoryNotice] = useState<string | null>(null);
   const [memoryChanged, setMemoryChanged] = useState(false);
   const [toolChanged, setToolChanged] = useState(false);
@@ -560,6 +564,26 @@ export default function Chat() {
     },
   });
   const busy = status === "streaming" || status === "submitted";
+  useEffect(() => {
+    const viewport = window.visualViewport;
+    const update = () => setViewportHeight(viewport?.height ?? window.innerHeight);
+    update();
+    viewport?.addEventListener("resize", update);
+    window.addEventListener("resize", update);
+    return () => {
+      viewport?.removeEventListener("resize", update);
+      window.removeEventListener("resize", update);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!chatHydrated || panel) return;
+    if (followRef.current || forceBottomRef.current) {
+      const node = chatScrollRef.current;
+      if (node) node.scrollTop = node.scrollHeight;
+      forceBottomRef.current = false;
+    }
+  }, [messages, status, chatHydrated, activeChatId, panel, viewportHeight]);
 
   function resetTransientImageState() {
     for (const objectUrl of retrievedImageObjectUrlsRef.current) {
@@ -619,6 +643,8 @@ export default function Chat() {
       resetTransientImageState();
       markLoadedMessagesSeen(loadedMessages);
       lastPersistedSignatureRef.current = persistenceSignature(loadedMessages);
+      forceBottomRef.current = true;
+      followRef.current = true;
       setMessages(loadedMessages as any);
       setActiveChatId(payload.chat.id);
       setChatSaveError(null);
@@ -727,6 +753,8 @@ export default function Chat() {
           const loadedMessages = chatPayload.messages ?? [];
           markLoadedMessagesSeen(loadedMessages);
           lastPersistedSignatureRef.current = persistenceSignature(loadedMessages);
+          forceBottomRef.current = true;
+          followRef.current = true;
           setMessages(loadedMessages as any);
           setActiveChatId(chatPayload.chat.id);
         } else {
@@ -1055,9 +1083,9 @@ export default function Chat() {
   }, [messages]);
 
   return (
-    <div style={{ maxWidth: 640, margin: "0 auto", padding: 16, display: "flex", flexDirection: "column", height: "100dvh" }}>
+    <div style={{ maxWidth: 640, margin: "0 auto", padding: "calc(12px + env(safe-area-inset-top, 0px)) 16px calc(12px + env(safe-area-inset-bottom, 0px))", boxSizing: "border-box", display: "flex", flexDirection: "column", height: viewportHeight ? `${viewportHeight}px` : "100dvh", overflow: "hidden" }}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-        <h1 style={{ fontSize: 20 }}>🍬 Princess Bubblegum</h1>
+        <h1 style={{ fontSize: 18, margin: 0, minWidth: 0 }}>🍬 Princess Bubblegum</h1>
         <div style={{ display: "flex", alignItems: "center" }}>
           <button onClick={openChats} aria-label="Browse chats" title="Chats" style={{ background: "none", border: "none", color: "#eee", fontSize: 22, padding: 8 }}>
             💬
@@ -1209,7 +1237,7 @@ export default function Chat() {
         </div>
       )}
 
-      <div style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column", gap: 8 }}>
+      <div ref={chatScrollRef} onScroll={() => { const node = chatScrollRef.current; if (node) followRef.current = node.scrollHeight - node.scrollTop - node.clientHeight < 100; }} style={{ flex: 1, minHeight: 0, overflowY: "auto", overscrollBehavior: "contain", display: "flex", flexDirection: "column", gap: 8 }}>
         {messages.map((m) => (
           <div key={m.id} style={{ alignSelf: m.role === "user" ? "flex-end" : "flex-start", background: m.role === "user" ? "#4a3f8c" : "#2d2d44", borderRadius: 12, padding: "8px 12px", maxWidth: "85%", whiteSpace: "pre-wrap" }}>
             {m.parts.map((p, i) => {
@@ -1222,7 +1250,7 @@ export default function Chat() {
                 }
                 if (p.state === "output-available" && result?.ok) {
                   const description = result.description ?? result.prompt ?? input?.prompt;
-                  return <div key={i} style={{ opacity: 0.75, marginTop: 8 }}>🖼️ Generated image{description ? <div style={{ marginTop: 4, fontSize: 13 }}>{description}</div> : null}</div>;
+                  return <div key={i} style={{ opacity: 0.75, marginTop: 8 }}>🖼️ Generated image{description ? <details style={{ marginTop: 4, fontSize: 13 }}><summary>View prompt</summary><div style={{ marginTop: 6, overflowWrap: "anywhere" }}>{description}</div></details> : null}</div>;
                 }
                 if (p.state === "output-available" && !result?.ok) return <span key={i} style={{ opacity: 0.7 }}>Image generation failed.</span>;
               }
@@ -1232,7 +1260,7 @@ export default function Chat() {
                   return <img key={i} src={result.imageUrl} alt="Image shown by Princess Bubblegum" width={256} height={256} style={{ display: "block", maxWidth: "100%", height: "auto", borderRadius: 10, marginTop: 8 }} />;
                 }
                 if (p.state === "output-available" && result?.ok) {
-                  return <div key={i} style={{ opacity: 0.75, marginTop: 8 }}>🖼️ Image shown in chat{result.description ? <div style={{ marginTop: 4, fontSize: 13 }}>{result.description}</div> : null}</div>;
+                  return <div key={i} style={{ opacity: 0.75, marginTop: 8 }}>🖼️ Image shown in chat{result.description ? <details style={{ marginTop: 4, fontSize: 13 }}><summary>View description</summary><div style={{ marginTop: 6, overflowWrap: "anywhere" }}>{result.description}</div></details> : null}</div>;
                 }
                 if (p.state === "output-available" && result?.ok === false) return <span key={i} style={{ opacity: 0.7 }}>{result.message ?? "Image display failed."}</span>;
               }
@@ -1247,6 +1275,8 @@ export default function Chat() {
         onSubmit={(e) => {
           e.preventDefault();
           if (input.trim() && !busy && chatHydrated) {
+            followRef.current = true;
+            forceBottomRef.current = true;
             sendMessage({ text: input });
             setInput("");
           }
