@@ -1256,6 +1256,14 @@ export default function Chat() {
                 if (p.state === "output-available" && !result?.ok) return <span key={i} style={{ opacity: 0.7 }}>Image generation failed.</span>;
               }
               if (p.type === "tool-showImage") {
+                // The generated image is already visible. Keep showImage available
+                // for archived images and for deliberately showing an image later.
+                const shownUrl = (p.output as { imageUrl?: string } | undefined)?.imageUrl;
+                if (shownUrl && m.parts.slice(0, i).some((prior) =>
+                  prior.type === "tool-generateImage" &&
+                  prior.state === "output-available" &&
+                  (prior.output as { imageUrl?: string } | undefined)?.imageUrl === shownUrl
+                )) return null;
                 const result = p.output as { ok?: boolean; imageUrl?: string; message?: string; description?: string; archiveId?: string } | undefined;
                 if (p.state === "output-available" && result?.ok && (result.imageUrl?.startsWith("blob:") || (result.imageUrl?.startsWith("data:image/") || result.imageUrl?.startsWith("/api/chat-image?id=")))) {
                   return <img key={i} src={result.imageUrl} alt="Image shown by Princess Bubblegum" width={256} height={256} style={{ display: "block", maxWidth: "100%", height: "auto", borderRadius: 10, marginTop: 8 }} />;
