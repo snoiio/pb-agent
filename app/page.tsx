@@ -11,6 +11,13 @@ type Memory = {
   updated_at: string;
 };
 
+type ChatSummary = {
+  id: string;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
 type ToolEvent = {
   id: string;
   timestamp: string;
@@ -87,6 +94,65 @@ function sanitizeOutgoingMessages(messages: Parameters<NonNullable<ConstructorPa
       };
     }),
   }));
+}
+
+// Neon stores the structured chat history, but never browser-local or base64 image data.
+function sanitizeMessagesForPersistence(messages: Array<any>) {
+  return messages.map((message) => ({
+    ...message,
+    parts: Array.isArray(message.parts)
+      ? message.parts.map((part: any) => {
+          if (
+            !["tool-generateImage", "tool-showImage"].includes(part?.type) ||
+            !part.output ||
+            typeof part.output !== "object"
+          ) {
+            return part;
+          }
+
+          const safeOutput = { ...part.output };
+          delete safeOutput.imageUrl;
+          if (part.type === "tool-generateImage") {
+            const fallbackPrompt =
+              typeof safeOutput.prompt === "string"
+                ? safeOutput.prompt
+                : typeof part.input?.prompt === "string"
+                  ? part.input.prompt
+                  : undefined;
+            return {
+              ...part,
+              output: {
+                ...safeOutput,
+                imageGenerated: true,
+                ...(fallbackPrompt ? { description: safeOutput.description ?? fallbackPrompt } : {}),
+              },
+            };
+          }
+
+          return {
+            ...part,
+            output: {
+              ...safeOutput,
+              imageShown: true,
+            },
+          };
+        })
+      : message.parts,
+  }));
+}
+
+function titleFromMessages(messages: Array<any>): string {
+  for (const message of messages) {
+    if (message?.role !== "user" || !Array.isArray(message.parts)) continue;
+    const text = message.parts
+      .filter((part: any) => part?.type === "text" && typeof part.text === "string")
+      .map((part: any) => part.text.trim())
+      .filter(Boolean)
+      .join(" ");
+    if (!text) continue;
+    return text.length > 70 ? `${text.slice(0, 67)}...` : text;
+  }
+  return "New chat";
 }
 
 function latestGeneratedImage(messages: Array<{ parts: Array<any> }>): GeneratedImageInfo | null {
@@ -171,7 +237,13 @@ export default function Chat() {
   const [memoryNotice, setMemoryNotice] = useState<string | null>(null);
   const [memoryChanged, setMemoryChanged] = useState(false);
   const [toolChanged, setToolChanged] = useState(false);
-  const [panel, setPanel] = useState<"memories" | "tools" | null>(null);
+  const [panel, setPanel] = useState<"chats" | "memories" | "tools" | null>(null);
+
+  const [chatList, setChatList] = useState<ChatSummary[]>([]);
+  const [activeChatId, setActiveChatId] = useState<string | null>(null);
+  const [chatsLoading, setChatsLoading] = useState(false);
+  const [chatHydrated, setChatHydrated] = useState(false);
+  const [chatSaveError, setChatSaveError] = useState<string | null>(null);
 
   const [memories, setMemories] = useState<Memory[]>([]);
   const [memoryQuery, setMemoryQuery] = useState("");
@@ -186,6 +258,8 @@ export default function Chat() {
   const latestImageInfoRef = useRef<GeneratedImageInfo | null>(null);
   const lastGeneratedImageUrlRef = useRef<string | null>(null);
   const retrievedImageObjectUrlsRef = useRef(new Set<string>());
+  const currentImageDescriptionRef = useRef<string | null>(null);
+  const currentImageArchiveIdRef = useRef<string | null>(null);
 
   const seenMemoryToolCalls = useRef(new Set<string>());
   const seenToolCalls = useRef(new Set<string>());
@@ -194,7 +268,7 @@ export default function Chat() {
       ? Intl.DateTimeFormat().resolvedOptions().timeZone
       : undefined;
 
-  const { messages, sendMessage, status, error, addToolOutput } = useChat({
+  const { messages, setMessages, sendMessage, status, error, addToolOutput } = useChat({
     transport: new DefaultChatTransport({
       api: "/api/chat",
       body: { timeZone },
@@ -248,6 +322,9 @@ export default function Chat() {
           const output = response.ok && payload.ok && payload.description
             ? payload.description
             : `Image inspection failed: ${payload.error ?? `HTTP ${response.status}`}`;
+          if (response.ok && payload.ok && payload.description) {
+            currentImageDescriptionRef.current = payload.description;
+          }
 
           addToolOutput({
             tool: "inspectImage",
@@ -289,6 +366,8 @@ export default function Chat() {
             ok: true,
             imageUrl,
             message: "Displayed the current image to the human.",
+            description: currentImageDescriptionRef.current ?? imageInfo?.prompt ?? undefined,
+            archiveId: currentImageArchiveIdRef.current ?? undefined,
           },
         });
         return;
@@ -441,6 +520,8 @@ export default function Chat() {
               const objectUrl = URL.createObjectURL(imageBlob);
               retrievedImageObjectUrlsRef.current.add(objectUrl);
               latestImageRef.current = objectUrl;
+              currentImageArchiveIdRef.current = payload.image.id;
+              currentImageDescriptionRef.current = payload.image.prompt || payload.image.title || "Archived image";
               output = `Loaded archived image as the current image: ${describeArchivedImage(payload.image)}. It has not been visually inspected or shown; use inspectImage if you want to examine it or showImage if you want the human to see it.`;
             }
           } else if (toolCall.toolName === "updateImage") {
@@ -475,6 +556,209 @@ export default function Chat() {
   });
   const busy = status === "streaming" || status === "submitted";
 
+  function resetTransientImageState() {
+    for (const objectUrl of retrievedImageObjectUrlsRef.current) {
+      URL.revokeObjectURL(objectUrl);
+    }
+    retrievedImageObjectUrlsRef.current.clear();
+    latestImageRef.current = null;
+    latestImageInfoRef.current = null;
+    lastGeneratedImageUrlRef.current = null;
+    currentImageDescriptionRef.current = null;
+    currentImageArchiveIdRef.current = null;
+  }
+
+  function resetSeenChatEvents() {
+    seenResponses.current.clear();
+    seenMemoryToolCalls.current.clear();
+    seenToolCalls.current.clear();
+  }
+
+  async function loadChatList(): Promise<ChatSummary[]> {
+    const response = await fetch("/api/chats");
+    const payload = await response.json() as { ok?: boolean; chats?: ChatSummary[]; error?: string };
+    if (!response.ok || !payload.ok) {
+      throw new Error(payload.error ?? `Could not load chats (HTTP ${response.status}).`);
+    }
+    const chats = payload.chats ?? [];
+    setChatList(chats);
+    return chats;
+  }
+
+  async function loadChat(chatId: string, closePanel = true) {
+    setChatsLoading(true);
+    setChatHydrated(false);
+    try {
+      const response = await fetch(`/api/chats?id=${encodeURIComponent(chatId)}`);
+      const payload = await response.json() as { ok?: boolean; chat?: ChatSummary; messages?: Array<any>; error?: string };
+      if (!response.ok || !payload.ok || !payload.chat) {
+        throw new Error(payload.error ?? `Could not load chat (HTTP ${response.status}).`);
+      }
+      resetTransientImageState();
+      resetSeenChatEvents();
+      setMessages((payload.messages ?? []) as any);
+      setActiveChatId(payload.chat.id);
+      setChatSaveError(null);
+      setChatList((current) => {
+        const without = current.filter((chat) => chat.id !== payload.chat!.id);
+        return [payload.chat!, ...without];
+      });
+      if (closePanel) setPanel(null);
+    } catch (loadError) {
+      console.error("[PB chats] load failed", loadError);
+      setChatSaveError("Chat history could not be loaded. This browser session still works normally.");
+    } finally {
+      setChatHydrated(true);
+      setChatsLoading(false);
+    }
+  }
+
+  async function createNewChat(closePanel = true) {
+    setChatsLoading(true);
+    setChatHydrated(false);
+    try {
+      const response = await fetch("/api/chats", { method: "POST" });
+      const payload = await response.json() as { ok?: boolean; chat?: ChatSummary; error?: string };
+      if (!response.ok || !payload.ok || !payload.chat) {
+        throw new Error(payload.error ?? `Could not create chat (HTTP ${response.status}).`);
+      }
+      resetTransientImageState();
+      resetSeenChatEvents();
+      setMessages([]);
+      setActiveChatId(payload.chat.id);
+      setChatList((current) => [payload.chat!, ...current.filter((chat) => chat.id !== payload.chat!.id)]);
+      setChatSaveError(null);
+      if (closePanel) setPanel(null);
+    } catch (createError) {
+      console.error("[PB chats] create failed", createError);
+      setChatSaveError("A persistent chat could not be created. This browser session still works normally.");
+    } finally {
+      setChatHydrated(true);
+      setChatsLoading(false);
+    }
+  }
+
+  async function openChats() {
+    setPanel("chats");
+    setChatsLoading(true);
+    try {
+      await loadChatList();
+    } catch (listError) {
+      console.error("[PB chats] list failed", listError);
+      setChatSaveError("Chat history could not be loaded.");
+    } finally {
+      setChatsLoading(false);
+    }
+  }
+
+  async function deleteChat(chat: ChatSummary) {
+    if (!window.confirm(`Delete this chat?\n\n"${chat.title}"`)) return;
+    try {
+      const response = await fetch("/api/chats", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: chat.id }),
+      });
+      const payload = await response.json() as { ok?: boolean; error?: string };
+      if (!response.ok || !payload.ok) {
+        throw new Error(payload.error ?? `Could not delete chat (HTTP ${response.status}).`);
+      }
+
+      const remaining = chatList.filter((item) => item.id !== chat.id);
+      setChatList(remaining);
+      if (activeChatId === chat.id) {
+        if (remaining.length) await loadChat(remaining[0].id, false);
+        else await createNewChat(false);
+      }
+    } catch (deleteError) {
+      console.error("[PB chats] delete failed", deleteError);
+      setChatSaveError("The chat could not be deleted.");
+    }
+  }
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function hydratePersistentChat() {
+      setChatsLoading(true);
+      try {
+        const response = await fetch("/api/chats");
+        const payload = await response.json() as { ok?: boolean; chats?: ChatSummary[]; error?: string };
+        if (!response.ok || !payload.ok) {
+          throw new Error(payload.error ?? `Could not load chats (HTTP ${response.status}).`);
+        }
+        if (cancelled) return;
+        const chats = payload.chats ?? [];
+        setChatList(chats);
+
+        if (chats.length) {
+          const chatResponse = await fetch(`/api/chats?id=${encodeURIComponent(chats[0].id)}`);
+          const chatPayload = await chatResponse.json() as { ok?: boolean; chat?: ChatSummary; messages?: Array<any>; error?: string };
+          if (!chatResponse.ok || !chatPayload.ok || !chatPayload.chat) {
+            throw new Error(chatPayload.error ?? `Could not load chat (HTTP ${chatResponse.status}).`);
+          }
+          if (cancelled) return;
+          setMessages((chatPayload.messages ?? []) as any);
+          setActiveChatId(chatPayload.chat.id);
+        } else {
+          const createResponse = await fetch("/api/chats", { method: "POST" });
+          const createPayload = await createResponse.json() as { ok?: boolean; chat?: ChatSummary; error?: string };
+          if (!createResponse.ok || !createPayload.ok || !createPayload.chat) {
+            throw new Error(createPayload.error ?? `Could not create chat (HTTP ${createResponse.status}).`);
+          }
+          if (cancelled) return;
+          setChatList([createPayload.chat]);
+          setActiveChatId(createPayload.chat.id);
+          setMessages([]);
+        }
+        setChatSaveError(null);
+      } catch (hydrateError) {
+        console.error("[PB chats] startup hydration failed", hydrateError);
+        if (!cancelled) {
+          setChatSaveError("Persistent chat history is unavailable. This browser session still works normally.");
+        }
+      } finally {
+        if (!cancelled) {
+          setChatHydrated(true);
+          setChatsLoading(false);
+        }
+      }
+    }
+
+    hydratePersistentChat();
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
+    if (!chatHydrated || !activeChatId || status !== "ready" || messages.length === 0) return;
+
+    const timer = window.setTimeout(async () => {
+      try {
+        const persistentMessages = sanitizeMessagesForPersistence(messages as Array<any>);
+        const response = await fetch("/api/chats", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            id: activeChatId,
+            title: titleFromMessages(messages as Array<any>),
+            messages: persistentMessages,
+          }),
+        });
+        const payload = await response.json() as { ok?: boolean; chat?: ChatSummary; error?: string };
+        if (!response.ok || !payload.ok || !payload.chat) {
+          throw new Error(payload.error ?? `Could not save chat (HTTP ${response.status}).`);
+        }
+        setChatSaveError(null);
+        setChatList((current) => [payload.chat!, ...current.filter((chat) => chat.id !== payload.chat!.id)]);
+      } catch (saveError) {
+        console.error("[PB chats] save failed", saveError);
+        setChatSaveError("Chat history could not be saved. The current browser conversation is still intact.");
+      }
+    }, 500);
+
+    return () => window.clearTimeout(timer);
+  }, [messages, status, activeChatId, chatHydrated]);
+
   useEffect(() => {
     setMemoryChanged(window.localStorage.getItem("pb-memory-changed") === "true");
     setToolChanged(window.localStorage.getItem("pb-tool-changed") === "true");
@@ -489,6 +773,8 @@ export default function Chat() {
     lastGeneratedImageUrlRef.current = imageInfo.imageUrl;
     latestImageRef.current = imageInfo.imageUrl;
     latestImageInfoRef.current = imageInfo;
+    currentImageDescriptionRef.current = imageInfo.prompt;
+    currentImageArchiveIdRef.current = null;
   }, [messages]);
 
   useEffect(() => () => {
@@ -733,6 +1019,9 @@ export default function Chat() {
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
         <h1 style={{ fontSize: 20 }}>🍬 Princess Bubblegum</h1>
         <div style={{ display: "flex", alignItems: "center" }}>
+          <button onClick={openChats} aria-label="Browse chats" title="Chats" style={{ background: "none", border: "none", color: "#eee", fontSize: 22, padding: 8 }}>
+            💬
+          </button>
           <button onClick={openTools} aria-label="View tool log" title="Tool log" style={{ background: "none", border: "none", color: "#eee", fontSize: 22, padding: 8, position: "relative" }}>
             🔧
             {toolChanged && <span aria-hidden="true" style={{ position: "absolute", top: 5, right: 4, width: 8, height: 8, borderRadius: "50%", background: "#e879a8", boxShadow: "0 0 0 2px #1a1a2e" }} />}
@@ -744,22 +1033,46 @@ export default function Chat() {
         </div>
       </div>
 
+      {chatSaveError && <div style={{ fontSize: 12, opacity: 0.65, margin: "-4px 0 8px" }}>{chatSaveError}</div>}
+
       {panel && (
         <div style={{ position: "fixed", inset: 0, zIndex: 900, background: "#1a1a2e", overflowY: "auto" }}>
           <main style={{ maxWidth: 640, margin: "0 auto", padding: 16, minHeight: "100dvh" }}>
             <header style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
               <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
                 <button onClick={() => setPanel(null)} aria-label="Close" style={{ background: "none", border: "none", color: "#eee", fontSize: 22, padding: 0 }}>←</button>
-                <h1 style={{ fontSize: 20, margin: 0 }}>{panel === "memories" ? "Memories" : "Tool Log"}</h1>
+                <h1 style={{ fontSize: 20, margin: 0 }}>{panel === "chats" ? "Chats" : panel === "memories" ? "Memories" : "Tool Log"}</h1>
               </div>
-              {panel === "memories" ? (
+              {panel === "chats" ? (
+                <button onClick={() => createNewChat()} disabled={chatsLoading} style={{ background: "none", border: "none", color: "#eee", padding: 8 }}>+ New Chat</button>
+              ) : panel === "memories" ? (
                 <span style={{ opacity: 0.65, fontSize: 14 }}>{memories.length}</span>
               ) : (
                 <button onClick={clearToolLog} disabled={toolEvents.length === 0} style={{ background: "none", border: "none", color: "#bbb", padding: 8 }}>Clear log</button>
               )}
             </header>
 
-            {panel === "memories" ? (
+            {panel === "chats" ? (
+              chatsLoading ? (
+                <div style={{ opacity: 0.6, padding: 12 }}>Loading chats…</div>
+              ) : chatList.length === 0 ? (
+                <div style={{ opacity: 0.6, padding: 12 }}>No chats yet.</div>
+              ) : (
+                <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                  {chatList.map((chat) => (
+                    <section key={chat.id} style={{ background: chat.id === activeChatId ? "#3a3658" : "#2d2d44", borderRadius: 14, padding: 14 }}>
+                      <button onClick={() => loadChat(chat.id)} style={{ display: "block", width: "100%", textAlign: "left", background: "none", border: "none", color: "#eee", padding: 0 }}>
+                        <div style={{ fontWeight: 700, lineHeight: 1.35 }}>{chat.title}</div>
+                        <div style={{ fontSize: 12, opacity: 0.55, marginTop: 6 }}>{formatDate(chat.updatedAt)}</div>
+                      </button>
+                      <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 8 }}>
+                        <button onClick={() => deleteChat(chat)} aria-label={`Delete ${chat.title}`} style={{ background: "none", border: "none", color: "#bbb", padding: 4 }}>🗑️</button>
+                      </div>
+                    </section>
+                  ))}
+                </div>
+              )
+            ) : panel === "memories" ? (
               <>
                 <input
                   value={memoryQuery}
@@ -862,16 +1175,24 @@ export default function Chat() {
             {m.parts.map((p, i) => {
               if (p.type === "text") return <span key={i}>{p.text}</span>;
               if (p.type === "tool-generateImage") {
-                const result = p.output as { ok?: boolean; imageUrl?: string; prompt?: string } | undefined;
+                const result = p.output as { ok?: boolean; imageUrl?: string; prompt?: string; description?: string } | undefined;
+                const input = p.input as { prompt?: string } | undefined;
                 if (p.state === "output-available" && result?.ok && result.imageUrl?.startsWith("data:image/")) {
                   return <img key={i} src={result.imageUrl} alt={result.prompt ?? "Generated illustration"} width={256} height={256} style={{ display: "block", maxWidth: "100%", height: "auto", borderRadius: 10, marginTop: 8 }} />;
+                }
+                if (p.state === "output-available" && result?.ok) {
+                  const description = result.description ?? result.prompt ?? input?.prompt;
+                  return <div key={i} style={{ opacity: 0.75, marginTop: 8 }}>🖼️ Generated image{description ? <div style={{ marginTop: 4, fontSize: 13 }}>{description}</div> : null}</div>;
                 }
                 if (p.state === "output-available" && !result?.ok) return <span key={i} style={{ opacity: 0.7 }}>Image generation failed.</span>;
               }
               if (p.type === "tool-showImage") {
-                const result = p.output as { ok?: boolean; imageUrl?: string; message?: string } | undefined;
+                const result = p.output as { ok?: boolean; imageUrl?: string; message?: string; description?: string; archiveId?: string } | undefined;
                 if (p.state === "output-available" && result?.ok && (result.imageUrl?.startsWith("blob:") || result.imageUrl?.startsWith("data:image/"))) {
                   return <img key={i} src={result.imageUrl} alt="Image shown by Princess Bubblegum" width={256} height={256} style={{ display: "block", maxWidth: "100%", height: "auto", borderRadius: 10, marginTop: 8 }} />;
+                }
+                if (p.state === "output-available" && result?.ok) {
+                  return <div key={i} style={{ opacity: 0.75, marginTop: 8 }}>🖼️ Image shown in chat{result.description ? <div style={{ marginTop: 4, fontSize: 13 }}>{result.description}</div> : null}</div>;
                 }
                 if (p.state === "output-available" && result?.ok === false) return <span key={i} style={{ opacity: 0.7 }}>{result.message ?? "Image display failed."}</span>;
               }
