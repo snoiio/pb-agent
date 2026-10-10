@@ -1,3 +1,6 @@
+import { put } from "@vercel/blob";
+import sharp from "sharp";
+import { randomUUID } from "node:crypto";
 import { convertToModelMessages, stepCountIs, streamText, tool } from "ai";
 import { createOpenRouter } from "@openrouter/ai-sdk-provider";
 import { neon } from "@neondatabase/serverless";
@@ -396,13 +399,11 @@ async function generateNovelAIImage(prompt: string, selfPortrait = false) {
       offset += 46 + filenameLength + extraLength + commentLength;
     }
     if (!image || image.length === 0) throw new Error("NovelAI returned no PNG image");
-    console.log("[PB image] NovelAI success", { imageBytes: image.length, selfPortrait, width, height });
-    return {
-      ok: true,
-      prompt,
-      createdAt: new Date().toISOString(),
-      imageUrl: `data:image/png;base64,${image.toString("base64")}`,
-    };
+    const webp = await sharp(image).webp({ quality: 85 }).toBuffer();
+    const imageId = randomUUID();
+    await put("pb-chat/" + imageId + ".webp", webp, { access: "private", contentType: "image/webp", addRandomSuffix: false });
+    console.log("[PB image] NovelAI success", { imageBytes: image.length, storedBytes: webp.length, imageId });
+    return { ok: true, prompt, createdAt: new Date().toISOString(), imageUrl: "/api/chat-image?id=" + imageId };
   } catch (error) {
     console.error("[PB image] NovelAI exception", {
       message: error instanceof Error ? error.message : "Unknown error",
