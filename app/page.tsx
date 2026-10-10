@@ -155,6 +155,10 @@ function titleFromMessages(messages: Array<any>): string {
   return "New chat";
 }
 
+function persistenceSignature(messages: Array<any>): string {
+  return JSON.stringify(sanitizeMessagesForPersistence(messages));
+}
+
 function latestGeneratedImage(messages: Array<{ parts: Array<any> }>): GeneratedImageInfo | null {
   for (let messageIndex = messages.length - 1; messageIndex >= 0; messageIndex -= 1) {
     const parts = messages[messageIndex].parts;
@@ -260,6 +264,7 @@ export default function Chat() {
   const retrievedImageObjectUrlsRef = useRef(new Set<string>());
   const currentImageDescriptionRef = useRef<string | null>(null);
   const currentImageArchiveIdRef = useRef<string | null>(null);
+  const lastPersistedSignatureRef = useRef("[]");
 
   const seenMemoryToolCalls = useRef(new Set<string>());
   const seenToolCalls = useRef(new Set<string>());
@@ -568,10 +573,25 @@ export default function Chat() {
     currentImageArchiveIdRef.current = null;
   }
 
-  function resetSeenChatEvents() {
+  function clearSeenChatEvents() {
     seenResponses.current.clear();
     seenMemoryToolCalls.current.clear();
     seenToolCalls.current.clear();
+  }
+
+  function markLoadedMessagesSeen(loadedMessages: Array<any>) {
+    clearSeenChatEvents();
+    for (const message of loadedMessages) {
+      if (message?.role === "assistant" && typeof message.id === "string") {
+        seenResponses.current.add(message.id);
+      }
+      if (!Array.isArray(message?.parts)) continue;
+      for (const part of message.parts) {
+        if (!part || typeof part !== "object" || typeof part.toolCallId !== "string") continue;
+        seenToolCalls.current.add(part.toolCallId);
+        seenMemoryToolCalls.current.add(part.toolCallId);
+      }
+    }
   }
 
   async function loadChatList(): Promise<ChatSummary[]> {
@@ -586,6 +606,7 @@ export default function Chat() {
   }
 
   async function loadChat(chatId: string, closePanel = true) {
+    if (busy) return;
     setChatsLoading(true);
     setChatHydrated(false);
     try {
@@ -594,9 +615,11 @@ export default function Chat() {
       if (!response.ok || !payload.ok || !payload.chat) {
         throw new Error(payload.error ?? `Could not load chat (HTTP ${response.status}).`);
       }
+      const loadedMessages = payload.messages ?? [];
       resetTransientImageState();
-      resetSeenChatEvents();
-      setMessages((payload.messages ?? []) as any);
+      markLoadedMessagesSeen(loadedMessages);
+      lastPersistedSignatureRef.current = persistenceSignature(loadedMessages);
+      setMessages(loadedMessages as any);
       setActiveChatId(payload.chat.id);
       setChatSaveError(null);
       setChatList((current) => {
@@ -614,6 +637,7 @@ export default function Chat() {
   }
 
   async function createNewChat(closePanel = true) {
+    if (busy) return;
     setChatsLoading(true);
     setChatHydrated(false);
     try {
@@ -623,7 +647,8 @@ export default function Chat() {
         throw new Error(payload.error ?? `Could not create chat (HTTP ${response.status}).`);
       }
       resetTransientImageState();
-      resetSeenChatEvents();
+      clearSeenChatEvents();
+      lastPersistedSignatureRef.current = "[]";
       setMessages([]);
       setActiveChatId(payload.chat.id);
       setChatList((current) => [payload.chat!, ...current.filter((chat) => chat.id !== payload.chat!.id)]);
@@ -652,6 +677,7 @@ export default function Chat() {
   }
 
   async function deleteChat(chat: ChatSummary) {
+    if (busy) return;
     if (!window.confirm(`Delete this chat?\n\n"${chat.title}"`)) return;
     try {
       const response = await fetch("/api/chats", {
@@ -698,7 +724,10 @@ export default function Chat() {
             throw new Error(chatPayload.error ?? `Could not load chat (HTTP ${chatResponse.status}).`);
           }
           if (cancelled) return;
-          setMessages((chatPayload.messages ?? []) as any);
+          const loadedMessages = chatPayload.messages ?? [];
+          markLoadedMessagesSeen(loadedMessages);
+          lastPersistedSignatureRef.current = persistenceSignature(loadedMessages);
+          setMessages(loadedMessages as any);
           setActiveChatId(chatPayload.chat.id);
         } else {
           const createResponse = await fetch("/api/chats", { method: "POST" });
@@ -707,6 +736,8 @@ export default function Chat() {
             throw new Error(createPayload.error ?? `Could not create chat (HTTP ${createResponse.status}).`);
           }
           if (cancelled) return;
+          clearSeenChatEvents();
+          lastPersistedSignatureRef.current = "[]";
           setChatList([createPayload.chat]);
           setActiveChatId(createPayload.chat.id);
           setMessages([]);
@@ -730,11 +761,19 @@ export default function Chat() {
   }, []);
 
   useEffect(() => {
-    if (!chatHydrated || !activeChatId || status !== "ready" || messages.length === 0) return;
+    if (
+      !chatHydrated ||
+      !activeChatId ||
+      (status !== "ready" && status !== "error") ||
+      messages.length === 0
+    ) return;
+
+    const persistentMessages = sanitizeMessagesForPersistence(messages as Array<any>);
+    const signature = JSON.stringify(persistentMessages);
+    if (signature === lastPersistedSignatureRef.current) return;
 
     const timer = window.setTimeout(async () => {
       try {
-        const persistentMessages = sanitizeMessagesForPersistence(messages as Array<any>);
         const response = await fetch("/api/chats", {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
@@ -748,6 +787,7 @@ export default function Chat() {
         if (!response.ok || !payload.ok || !payload.chat) {
           throw new Error(payload.error ?? `Could not save chat (HTTP ${response.status}).`);
         }
+        lastPersistedSignatureRef.current = signature;
         setChatSaveError(null);
         setChatList((current) => [payload.chat!, ...current.filter((chat) => chat.id !== payload.chat!.id)]);
       } catch (saveError) {
@@ -1044,7 +1084,7 @@ export default function Chat() {
                 <h1 style={{ fontSize: 20, margin: 0 }}>{panel === "chats" ? "Chats" : panel === "memories" ? "Memories" : "Tool Log"}</h1>
               </div>
               {panel === "chats" ? (
-                <button onClick={() => createNewChat()} disabled={chatsLoading} style={{ background: "none", border: "none", color: "#eee", padding: 8 }}>+ New Chat</button>
+                <button onClick={() => createNewChat()} disabled={chatsLoading || busy} style={{ background: "none", border: "none", color: "#eee", padding: 8 }}>+ New Chat</button>
               ) : panel === "memories" ? (
                 <span style={{ opacity: 0.65, fontSize: 14 }}>{memories.length}</span>
               ) : (
@@ -1061,12 +1101,12 @@ export default function Chat() {
                 <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
                   {chatList.map((chat) => (
                     <section key={chat.id} style={{ background: chat.id === activeChatId ? "#3a3658" : "#2d2d44", borderRadius: 14, padding: 14 }}>
-                      <button onClick={() => loadChat(chat.id)} style={{ display: "block", width: "100%", textAlign: "left", background: "none", border: "none", color: "#eee", padding: 0 }}>
+                      <button disabled={busy} onClick={() => loadChat(chat.id)} style={{ display: "block", width: "100%", textAlign: "left", background: "none", border: "none", color: "#eee", padding: 0 }}>
                         <div style={{ fontWeight: 700, lineHeight: 1.35 }}>{chat.title}</div>
                         <div style={{ fontSize: 12, opacity: 0.55, marginTop: 6 }}>{formatDate(chat.updatedAt)}</div>
                       </button>
                       <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 8 }}>
-                        <button onClick={() => deleteChat(chat)} aria-label={`Delete ${chat.title}`} style={{ background: "none", border: "none", color: "#bbb", padding: 4 }}>🗑️</button>
+                        <button disabled={busy} onClick={() => deleteChat(chat)} aria-label={`Delete ${chat.title}`} style={{ background: "none", border: "none", color: "#bbb", padding: 4 }}>🗑️</button>
                       </div>
                     </section>
                   ))}
@@ -1206,15 +1246,15 @@ export default function Chat() {
       <form
         onSubmit={(e) => {
           e.preventDefault();
-          if (input.trim() && !busy) {
+          if (input.trim() && !busy && chatHydrated) {
             sendMessage({ text: input });
             setInput("");
           }
         }}
         style={{ display: "flex", gap: 8, marginTop: 8 }}
       >
-        <input value={input} onChange={(e) => setInput(e.target.value)} placeholder="Tell the Princess something…" style={{ flex: 1, padding: 12, borderRadius: 12, border: "none", background: "#2d2d44", color: "#eee" }} />
-        <button disabled={busy} style={{ padding: "0 16px", borderRadius: 12, border: "none", background: "#e879a8", color: "#1a1a2e", fontWeight: 700 }}>Send</button>
+        <input disabled={!chatHydrated} value={input} onChange={(e) => setInput(e.target.value)} placeholder={chatHydrated ? "Tell the Princess something…" : "Loading chat…"} style={{ flex: 1, padding: 12, borderRadius: 12, border: "none", background: "#2d2d44", color: "#eee" }} />
+        <button disabled={busy || !chatHydrated} style={{ padding: "0 16px", borderRadius: 12, border: "none", background: "#e879a8", color: "#1a1a2e", fontWeight: 700 }}>Send</button>
       </form>
     </div>
   );
