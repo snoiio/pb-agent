@@ -313,26 +313,26 @@ async function generateNovelAIImage(prompt: string, selfPortrait = false) {
   const token = process.env.NOVELAI_API_TOKEN;
   if (!token) return { ok: false, error: "NovelAI API token is not configured." };
 
-  const model = "nai-diffusion-4-5-full";
+  const model = "nai-diffusion-5-full";
   const negativePrompt = "lowres, blurry, bad anatomy, bad hands, text, watermark";
   const effectivePrompt = selfPortrait
     ? `fur dataset, Princess Bubblegum from Adventure Time, ${prompt.trim()} In the art style of Adventure Time.`
     : prompt;
-  const width = selfPortrait ? 512 : 832;
-  const height = selfPortrait ? 768 : 1216;
+  const width = selfPortrait ? 512 : 512;
+  const height = selfPortrait ? 768 : 768;
   const caption = { base_caption: effectivePrompt, char_captions: [] };
   const payload = {
     input: effectivePrompt,
     model,
     action: "generate",
     parameters: {
-      params_version: 3,
+      params_version: 4,
       width,
       height,
-      steps: 28,
+      steps: 23,
       n_samples: 1,
       sampler: "k_euler_ancestral",
-      scale: 5,
+      scale: 7,
       noise_schedule: "karras",
       negative_prompt: negativePrompt,
       qualityToggle: false,
