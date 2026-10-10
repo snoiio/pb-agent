@@ -329,7 +329,7 @@ async function generateNovelAIImage(prompt: string, selfPortrait = false) {
       params_version: 4,
       width,
       height,
-      steps: 23,
+      steps: 14,
       n_samples: 1,
       sampler: "k_euler_ancestral",
       scale: 7,
