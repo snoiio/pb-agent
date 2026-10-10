@@ -1218,7 +1218,7 @@ export default function Chat() {
                 const result = p.output as { ok?: boolean; imageUrl?: string; prompt?: string; description?: string } | undefined;
                 const input = p.input as { prompt?: string } | undefined;
                 if (p.state === "output-available" && result?.ok && result.imageUrl?.startsWith("data:image/")) {
-                  return <img key={i} src={result.imageUrl} alt={result.prompt ?? "Generated illustration"} width={256} height={256} style={{ display: "block", maxWidth: "100%", height: "auto", borderRadius: 10, marginTop: 8 }} />;
+                  return null;
                 }
                 if (p.state === "output-available" && result?.ok) {
                   const description = result.description ?? result.prompt ?? input?.prompt;
