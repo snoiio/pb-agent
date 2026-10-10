@@ -22,14 +22,20 @@ async function ensureChatTables() {
       message_id TEXT NOT NULL,
       role TEXT NOT NULL,
       message JSONB NOT NULL,
+      position INTEGER,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       PRIMARY KEY (chat_id, message_id)
     )
   `;
 
   await sql`
-    CREATE INDEX IF NOT EXISTS chat_messages_chat_created_idx
-    ON chat_messages (chat_id, created_at)
+    ALTER TABLE chat_messages
+    ADD COLUMN IF NOT EXISTS position INTEGER
+  `;
+
+  await sql`
+    CREATE INDEX IF NOT EXISTS chat_messages_chat_position_idx
+    ON chat_messages (chat_id, position, created_at)
   `;
 }
 
@@ -88,7 +94,7 @@ export async function GET(request: Request) {
     SELECT message
     FROM chat_messages
     WHERE chat_id = ${id}
-    ORDER BY created_at ASC
+    ORDER BY position ASC NULLS LAST, created_at ASC, message_id ASC
   `;
 
   return Response.json({
@@ -138,17 +144,32 @@ export async function PUT(request: Request) {
     return Response.json({ ok: false, error: "Chat not found." }, { status: 404 });
   }
 
-  for (const message of messages) {
+  for (let index = 0; index < messages.length; index += 1) {
+    const message = messages[index];
     const serialized = JSON.stringify(message);
     if (serialized.length > 250_000) {
       return Response.json({ ok: false, error: "One chat message is too large to persist." }, { status: 413 });
     }
 
     await sql`
-      INSERT INTO chat_messages (chat_id, message_id, role, message)
-      VALUES (${id}, ${message.id}, ${message.role}, ${serialized}::jsonb)
+      INSERT INTO chat_messages (chat_id, message_id, role, message, position)
+      VALUES (${id}, ${message.id}, ${message.role}, ${serialized}::jsonb, ${index})
       ON CONFLICT (chat_id, message_id)
-      DO UPDATE SET role = EXCLUDED.role, message = EXCLUDED.message
+      DO UPDATE SET
+        role = EXCLUDED.role,
+        message = EXCLUDED.message,
+        position = EXCLUDED.position
+    `;
+  }
+
+  const messageIds = messages.map((message) => message.id);
+  if (messageIds.length === 0) {
+    await sql`DELETE FROM chat_messages WHERE chat_id = ${id}`;
+  } else {
+    await sql`
+      DELETE FROM chat_messages
+      WHERE chat_id = ${id}
+      AND NOT (message_id = ANY(${messageIds}::text[]))
     `;
   }
 
